@@ -133,7 +133,7 @@ def format_plan(plan) -> str:
 
 # ---------- sub-handlers ----------
 
-def handle_admin_cmd(parts: list[str], respond):
+def handle_admin_cmd(parts: list[str], caller_id: str, respond):
     subparts = parts[1:]
     admin = load_admin()
 
@@ -142,6 +142,11 @@ def handle_admin_cmd(parts: list[str], respond):
             respond(text="No admin set. Use `/professor admin set @you`", response_type="ephemeral")
         else:
             respond(text=f"Admin: <@{admin}> — added to every channel on launch.", response_type="ephemeral")
+        return
+
+    # Only allow changes if no admin is set yet, or the caller is the current admin
+    if admin and caller_id != admin:
+        respond(text="Only the current admin can change admin settings.", response_type="ephemeral")
         return
 
     sub = subparts[0].lower()
@@ -567,10 +572,11 @@ def handle_professor(ack, command, client, respond):
         respond(text=USAGE, response_type="ephemeral")
         return
 
+    caller_id = command.get("user_id", "")
     mode = parts[0].lower()
     try:
         if mode == "admin":
-            handle_admin_cmd(parts, respond)
+            handle_admin_cmd(parts, caller_id, respond)
         elif mode == "mentor":
             handle_mentor_cmd(parts, respond)
         elif mode == "plan":
