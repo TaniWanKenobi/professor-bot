@@ -87,7 +87,7 @@ def save_admin(uid: str | None): _save(ADMIN_FILE, uid)
 def parse_mentions(tokens: list[str]) -> list[str]:
     user_ids = []
     for token in tokens:
-        m = re.match(r"<@([A-Z0-9]+)(?:\|[^>]*)?>", token)
+        m = re.search(r"<@([A-Za-z0-9]+)(?:\|[^>]*)?>", token)
         if m:
             user_ids.append(m.group(1))
     return user_ids
