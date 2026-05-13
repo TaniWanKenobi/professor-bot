@@ -577,6 +577,7 @@ def handle_professor(ack, command, client, respond):
         return
 
     caller_id = command.get("user_id", "")
+    raw_text = command.get("text", "").strip()
     mode = parts[0].lower()
     try:
         if mode == "admin":
@@ -598,7 +599,7 @@ def handle_professor(ack, command, client, respond):
         else:
             respond(text=f"Unknown command `{mode}`.\n\n{USAGE}", response_type="ephemeral")
     except Exception as e:
-        respond(text=f"Error: {e}", response_type="ephemeral")
+        respond(text=f"Error: {e}\n_Command:_ `/professor {raw_text}`", response_type="ephemeral")
 
 
 if __name__ == "__main__":
