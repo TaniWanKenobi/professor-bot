@@ -187,7 +187,9 @@ def handle_mentor_cmd(parts: list[str], respond):
             return
         updated = list(dict.fromkeys(mentors + new))
         save_mentors(updated)
-        respond(text=f"Added {len(new)} mentor(s). Total {len(updated)}:\n{fmt(updated)}", response_type="ephemeral")
+        excluded = list(set(load_exclude_list() + new))
+        save_exclude_list(excluded)
+        respond(text=f"Added {len(new)} mentor(s). Total {len(updated)}:\n{fmt(updated)}\n_Also added to exclude list._", response_type="ephemeral")
 
     elif sub == "remove":
         rem = parse_mentions(subparts[1:])
@@ -204,7 +206,9 @@ def handle_mentor_cmd(parts: list[str], respond):
             respond(text="Mention at least one user: `/professor mentor set @u1 @u2 …`", response_type="ephemeral")
             return
         save_mentors(new)
-        respond(text=f"Mentor list set ({len(new)}):\n{fmt(new)}", response_type="ephemeral")
+        excluded = list(set(load_exclude_list() + new))
+        save_exclude_list(excluded)
+        respond(text=f"Mentor list set ({len(new)}):\n{fmt(new)}\n_All added to exclude list._", response_type="ephemeral")
 
     elif sub == "clear":
         save_mentors([])
