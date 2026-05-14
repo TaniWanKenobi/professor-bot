@@ -582,6 +582,14 @@ def handle_professor(ack, command, client, respond):
     caller_id = command.get("user_id", "")
     raw_text = command.get("text", "").strip()
     mode = parts[0].lower()
+    admin = load_admin()
+
+    # admin show is always public
+    if not (mode == "admin" and (not parts[1:] or parts[1].lower() == "show")):
+        if admin and caller_id != admin:
+            respond(text=f"Only the admin (<@{admin}>) can use this bot.", response_type="ephemeral")
+            return
+
     try:
         if mode == "admin":
             handle_admin_cmd(parts, caller_id, respond)
