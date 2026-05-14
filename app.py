@@ -568,19 +568,35 @@ def handle_reaction_cmd(mode: str, parts: list[str], client, respond):
     respond(text=out, response_type="ephemeral")
 
 
+_ERROR_PREFIXES = (
+    "Error", "Usage", "No active plan", "No channels", "No bot",
+    "No mentors", "Could not", "Mention at least", "Unknown",
+    "Warning", "Only the current", "Only the admin", "Group ",
+    "Groups ", "Exclude list is empty", "The exclude list",
+)
+
+def _wrap_respond(base_respond, raw_text: str):
+    def wrapped(text="", **kwargs):
+        if any(text.startswith(p) for p in _ERROR_PREFIXES):
+            text = f"{text}\n_Command:_ `/professor {raw_text}`"
+        base_respond(text=text, **kwargs)
+    return wrapped
+
+
 # ---------- main dispatch ----------
 
 @app.command("/professor")
 def handle_professor(ack, command, client, respond):
     ack()
     parts = command.get("text", "").strip().split()
+    raw_text = command.get("text", "").strip()
+    respond = _wrap_respond(respond, raw_text)
 
     if not parts:
         respond(text=USAGE, response_type="ephemeral")
         return
 
     caller_id = command.get("user_id", "")
-    raw_text = command.get("text", "").strip()
     mode = parts[0].lower()
     admin = load_admin()
 
@@ -610,7 +626,7 @@ def handle_professor(ack, command, client, respond):
         else:
             respond(text=f"Unknown command `{mode}`.\n\n{USAGE}", response_type="ephemeral")
     except Exception as e:
-        respond(text=f"Error: {e}\n_Command:_ `/professor {raw_text}`", response_type="ephemeral")
+        respond(text=f"Error: {e}", response_type="ephemeral")
 
 
 if __name__ == "__main__":
