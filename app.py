@@ -100,7 +100,10 @@ def parse_message_link(link: str) -> tuple[str | None, str | None]:
     return m.group(1), raw_ts[:-6] + "." + raw_ts[-6:]
 
 def get_reactors(client, channel: str, timestamp: str, emoji: str) -> list[str]:
-    client.conversations_join(channel=channel)
+    try:
+        client.conversations_join(channel=channel)
+    except Exception:
+        pass  # channel may be private or bot already a member — try anyway
     resp = client.reactions_get(channel=channel, timestamp=timestamp, full=True)
     for reaction in resp["message"].get("reactions", []):
         if reaction["name"] == emoji:
