@@ -948,9 +948,36 @@ def handle_audit_cmd(parts: list[str], client, respond):
         respond(text=f"No :{emoji}: reactors found (or all are excluded).", response_type="ephemeral")
         return
 
+    # Build live membership map from Slack (source of truth, not channels.json)
+    bot_channels = load_channels()
+    live_members: dict[str, int] = {}  # user_id -> group_id
+    channel_live_counts: dict[int, int] = {}
+    mentors = set(load_mentors())
+    admin = load_admin()
+    excluded_from_count = mentors | ({admin} if admin else set())
+
+    for c in bot_channels:
+        try:
+            cursor = None
+            members = []
+            while True:
+                kwargs = {"channel": c["channel_id"], "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = client.conversations_members(**kwargs)
+                members.extend(resp.get("members", []))
+                cursor = resp.get("response_metadata", {}).get("next_cursor")
+                if not cursor:
+                    break
+            for uid in members:
+                live_members[uid] = c["group_id"]
+            channel_live_counts[c["group_id"]] = sum(1 for u in members if u not in excluded_from_count)
+        except Exception as e:
+            print(f"[audit] members fetch error for group {c['group_id']}: {e}")
+
     missing, placed = [], []
     for uid in reactors:
-        gid = get_user_group(uid)
+        gid = live_members.get(uid)
         if gid:
             placed.append((uid, gid))
         else:
@@ -963,16 +990,10 @@ def handle_audit_cmd(parts: list[str], client, respond):
         lines.append(f"\n*Not in any group channel ({len(missing)}):*")
         lines.append("\n".join(f"• {fmt_user(u)}" for u in missing))
 
-    # Per-channel participant counts (excluding mentors and admin)
-    channels = load_channels()
-    if channels:
-        mentors = set(load_mentors())
-        admin = load_admin()
-        if admin:
-            mentors.add(admin)
-        lines.append("\n*Participants per channel (excl. mentors & admin):*")
-        for c in sorted(channels, key=lambda x: x["group_id"]):
-            count = sum(1 for p in c["participants"] if p not in mentors)
+    if channel_live_counts:
+        lines.append("\n*Participants per channel (live, excl. mentors & admin):*")
+        for c in sorted(bot_channels, key=lambda x: x["group_id"]):
+            count = channel_live_counts.get(c["group_id"], "?")
             lines.append(f"• <#{c['channel_id']}> (Group {c['group_id']}): {count} participants")
 
     respond(text="\n".join(lines), response_type="ephemeral")
