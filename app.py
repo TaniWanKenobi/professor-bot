@@ -656,6 +656,14 @@ def handle_launch_cmd(parts: list[str], client, respond):
             if members:
                 client.conversations_invite(channel=cid, users=",".join(members))
 
+            # Set channel topic
+            try:
+                mentor_mentions = " · ".join(f"<@{u}>" for u in g["mentors"])
+                topic = f"Mentors: {mentor_mentions} | Ask questions, share what you're building, and connect with your group!"
+                client.conversations_setTopic(channel=cid, topic=topic)
+            except Exception as te:
+                print(f"[topic] Group {g['id']}: {te}")
+
             # Create canvas with group info
             try:
                 canvas_md = build_canvas_md(g["id"], g["participants"], g["mentors"])
@@ -708,6 +716,36 @@ def handle_channels_cmd(parts: list[str], client, respond):
         return
 
     sub = subparts[0].lower()
+
+    if sub == "settopic":
+        if not channels:
+            respond(text="No bot-created channels yet.", response_type="ephemeral")
+            return
+        plan = load_plan()
+        updated, errors = [], []
+        for c in channels:
+            mentors = c.get("mentors", [])
+            if not mentors and plan:
+                group = next((g for g in plan["groups"] if g["id"] == c["group_id"]), None)
+                if group:
+                    mentors = group.get("mentors", [])
+            if not mentors:
+                errors.append(f"Group {c['group_id']}: no mentors assigned")
+                continue
+            try:
+                mentor_mentions = " · ".join(f"<@{u}>" for u in mentors)
+                topic = f"Mentors: {mentor_mentions} | Ask questions, share what you're building, and connect with your group!"
+                client.conversations_setTopic(channel=c["channel_id"], topic=topic)
+                updated.append(f"<#{c['channel_id']}> (Group {c['group_id']})")
+            except Exception as e:
+                errors.append(f"Group {c['group_id']}: {e}")
+        lines = []
+        if updated:
+            lines.append("*Topics set on:*\n" + "\n".join(f"• {x}" for x in updated))
+        if errors:
+            lines.append("*Errors:*\n" + "\n".join(f"• {x}" for x in errors))
+        respond(text="\n".join(lines) or "Nothing updated.", response_type="ephemeral")
+        return
 
     if sub == "rename":
         if not channels:
