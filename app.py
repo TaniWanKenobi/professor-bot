@@ -202,21 +202,22 @@ def get_user_group(user_id: str) -> int | None:
             return c["group_id"]
     return None
 
+def fmt_user(user_id: str) -> str:
+    return f"<@{user_id}> ({user_id})"
+
+def fmt_users(users: list[str]) -> str:
+    return "\n".join(f"  • {fmt_user(u)}" for u in users)
+
 def format_plan(plan, client=None) -> str:
     if not plan:
         return "No active plan. Run `/professor plan <N> <link> <emoji>` to create one."
     total = sum(len(g["participants"]) for g in plan["groups"])
     lines = [f"*Plan — {len(plan['groups'])} groups, {total} participants:*"]
     for g in plan["groups"]:
-        if client:
-            p_str = ", ".join(resolve_name(client, u) for u in g["participants"])
-            m_str = ", ".join(resolve_name(client, u) for u in g["mentors"]) if g["mentors"] else "_none assigned_"
-        else:
-            p_str = fmt(g["participants"])
-            m_str = fmt(g["mentors"]) if g["mentors"] else "_none assigned_"
+        m_str = fmt_users(g["mentors"]) if g["mentors"] else "  _none assigned_"
         lines.append(
-            f"\n*Group {g['id']}* ({len(g['participants'])} participants): {p_str}"
-            f"\n  Mentors: {m_str}"
+            f"\n*Group {g['id']}* ({len(g['participants'])} participants):\n{fmt_users(g['participants'])}"
+            f"\n  *Mentors:*\n{m_str}"
         )
     return "\n".join(lines)
 
@@ -451,10 +452,7 @@ def handle_plan_cmd(parts: list[str], client, respond):
     subparts = parts[1:]
 
     if not subparts or subparts[0].lower() == "show":
-        plan = load_plan()
-        if plan:
-            preload_names(client)
-        respond(text=format_plan(plan, client), response_type="ephemeral")
+        respond(text=format_plan(load_plan()), response_type="ephemeral")
         return
 
     if subparts[0].lower() == "clear":
@@ -498,9 +496,8 @@ def handle_plan_cmd(parts: list[str], client, respond):
         ],
     }
     save_plan(plan)
-    preload_names(client)
     respond(
-        text=f"Plan created: {n} groups, {len(participants)} participants.\n\n{format_plan(plan, client)}\n\nAssign mentors with `/professor assign <group#> @mentor1 @mentor2`",
+        text=f"Plan created: {n} groups, {len(participants)} participants.\n\n{format_plan(plan)}\n\nAssign mentors with `/professor assign <group#> @mentor1 @mentor2`",
         response_type="ephemeral",
     )
 
