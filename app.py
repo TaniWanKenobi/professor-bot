@@ -301,7 +301,7 @@ def handle_reaction_added(event):
         save_watchers(watchers)
 
 
-# ---------- event: member_joined_channel ----------
+# ---------- events: member_joined_channel / member_left_channel ----------
 
 @app.event("member_joined_channel")
 def handle_member_joined(event):
@@ -330,6 +330,43 @@ def handle_member_joined(event):
             if g["id"] == group_num:
                 if user_id not in g["participants"] and user_id not in g["mentors"]:
                     g["participants"].append(user_id)
+                    save_plan(plan)
+                break
+
+
+@app.event("member_left_channel")
+def handle_member_left(event):
+    user_id = event.get("user")
+    channel_id = event.get("channel")
+    if not user_id or not channel_id:
+        return
+
+    channels = load_channels()
+    ch = next((c for c in channels if c["channel_id"] == channel_id), None)
+    if not ch:
+        return
+
+    group_num = ch["group_id"]
+    changed_channels = False
+    if user_id in ch["participants"]:
+        ch["participants"].remove(user_id)
+        changed_channels = True
+    elif user_id in ch.get("mentors", []):
+        ch["mentors"].remove(user_id)
+        changed_channels = True
+
+    if changed_channels:
+        save_channels(channels)
+
+    plan = load_plan()
+    if plan:
+        for g in plan["groups"]:
+            if g["id"] == group_num:
+                if user_id in g["participants"]:
+                    g["participants"].remove(user_id)
+                    save_plan(plan)
+                elif user_id in g["mentors"]:
+                    g["mentors"].remove(user_id)
                     save_plan(plan)
                 break
 

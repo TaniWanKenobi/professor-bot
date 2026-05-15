@@ -39,6 +39,7 @@ settings:
     bot_events:
       - reaction_added
       - member_joined_channel
+      - member_left_channel
   socket_mode_enabled: true
   token_rotation_enabled: false
 ```
