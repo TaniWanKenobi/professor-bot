@@ -2,6 +2,7 @@ import os
 import re
 import json
 import random
+import threading
 from datetime import datetime, timezone
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -16,11 +17,12 @@ MENTORS_FILE = "mentors.json"
 PLAN_FILE = "plan.json"
 CHANNELS_FILE = "channels.json"
 ADMIN_FILE = "admin.json"
+WATCHERS_FILE = "watchers.json"
 
 USAGE = (
-    "*`/professor` — reaction-based group channel creator*\n\n"
-    "*Admin (added to every channel automatically):*\n"
-    "• `/professor admin set @you` — set yourself as admin\n"
+    "*`/professor` — mentorship group channel manager*\n\n"
+    "*Admin:*\n"
+    "• `/professor admin set @you` — set admin (only admin can run all other commands)\n"
     "• `/professor admin show` — show current admin\n"
     "• `/professor admin clear` — clear admin\n\n"
     "*Reaction lookups:*\n"
@@ -28,19 +30,24 @@ USAGE = (
     "• `/professor random <link> <emoji> [--exclude @u …]` — list in random order\n"
     "• `/professor groups <N> <link> <emoji> [--exclude @u …]` — preview N random groups\n\n"
     "*Group channel workflow:*\n"
-    "• `/professor plan <N> <link> <emoji>` — split reactors (minus excluded) into N groups & save\n"
-    "• `/professor plan show` — show current plan\n"
-    "• `/professor plan clear` — discard current plan\n"
-    "• `/professor assign <group#> @mentor1 @mentor2` — set mentors for a group (2 preferred, 3 if needed)\n"
-    "• `/professor assign show` — show all mentor assignments\n"
-    "• `/professor assign clear` — clear all mentor assignments\n"
-    "• `/professor launch [prefix]` — create private channels for all fully-assigned groups\n\n"
+    "• `/professor plan <N> <link> <emoji>` — split reactors into N groups & save\n"
+    "• `/professor plan show` — show plan with display names\n"
+    "• `/professor plan clear` — discard plan\n"
+    "• `/professor assign <group#> @mentor1 @mentor2` — assign mentors (2 preferred, 3 if needed)\n"
+    "• `/professor assign show` — show assignments\n"
+    "• `/professor assign clear` — clear all assignments\n"
+    "• `/professor launch [prefix]` — create private channels, invite everyone, create canvas\n\n"
+    "*Reaction watcher (DMs you when people react):*\n"
+    "• `/professor watch <link> <emoji>` — watch a message for reactions\n"
+    "• `/professor watch list` — show active watchers\n"
+    "• `/professor watch remove <link> <emoji>` — stop watching\n"
+    "• `/professor watch clear` — remove all watchers\n\n"
     "*Mentor list:*\n"
-    "• `/professor mentor list` — show stored mentors\n"
-    "• `/professor mentor add @u …` — add mentors\n"
+    "• `/professor mentor list` — show mentors\n"
+    "• `/professor mentor add @u …` — add mentors (auto-excluded from participant pool)\n"
     "• `/professor mentor remove @u …` — remove mentors\n"
-    "• `/professor mentor set @u1 @u2 …` — replace the entire mentor list\n"
-    "• `/professor mentor clear` — clear mentor list\n\n"
+    "• `/professor mentor set @u1 @u2 …` — replace entire list\n"
+    "• `/professor mentor clear` — clear list\n\n"
     "*Channel management:*\n"
     "• `/professor channels list` — list bot-created channels\n"
     "• `/professor channels add @u <group#>` — add someone to a group's channel\n"
@@ -48,10 +55,25 @@ USAGE = (
     "• `/professor channels archive` — archive all bot-created channels\n\n"
     "*Exclude list:*\n"
     "• `/professor exclude` — show excluded users\n"
-    "• `/professor exclude add @u …` — add to exclude list (also works inline with `--exclude`)\n"
-    "• `/professor exclude remove @u …` — remove from exclude list\n"
-    "• `/professor exclude clear` — clear exclude list"
+    "• `/professor exclude add @u …` — add (also works inline with `--exclude`)\n"
+    "• `/professor exclude remove @u …` — remove\n"
+    "• `/professor exclude clear` — clear"
 )
+
+_ERROR_PREFIXES = (
+    "Error", "Usage", "No active plan", "No channels", "No bot",
+    "No mentors", "No watched", "Could not", "Mention at least",
+    "Unknown", "Warning", "Only the current", "Only the admin",
+    "Group ", "Groups ", "Exclude list is empty", "Already watching",
+    "Not watching",
+)
+
+def _wrap_respond(base_respond, raw_text: str):
+    def wrapped(text="", **kwargs):
+        if any(text.startswith(p) for p in _ERROR_PREFIXES):
+            text = f"{text}\n_Command:_ `/professor {raw_text}`"
+        base_respond(text=text, **kwargs)
+    return wrapped
 
 
 # ---------- persistence ----------
@@ -70,9 +92,22 @@ def load_exclude_list(): return _load(EXCLUDE_FILE, [])
 def save_exclude_list(u): _save(EXCLUDE_FILE, list(set(u)))
 
 def load_mentors(): return _load(MENTORS_FILE, [])
-def save_mentors(u): _save(MENTORS_FILE, list(dict.fromkeys(u)))  # ordered dedup
+def save_mentors(u): _save(MENTORS_FILE, list(dict.fromkeys(u)))
 
-def load_plan(): return _load(PLAN_FILE, None)
+def load_plan():
+    data = _load(PLAN_FILE, None)
+    if data is None:
+        return None
+    # Accept both list format (bot-generated) and dict format (hand-crafted)
+    # List format:  {"groups": [{"id": 1, "participants": [...], "mentors": [...]}, ...]}
+    # Dict format:  {"groups": {"1": {"participants": [...], "mentors": [...]}, ...}}
+    if isinstance(data.get("groups"), dict):
+        data["groups"] = [
+            {"id": int(k), "participants": v["participants"], "mentors": v.get("mentors", [])}
+            for k, v in sorted(data["groups"].items(), key=lambda x: int(x[0]))
+        ]
+    return data
+
 def save_plan(p): _save(PLAN_FILE, p)
 
 def load_channels(): return _load(CHANNELS_FILE, [])
@@ -80,6 +115,45 @@ def save_channels(c): _save(CHANNELS_FILE, c)
 
 def load_admin() -> str | None: return _load(ADMIN_FILE, None)
 def save_admin(uid: str | None): _save(ADMIN_FILE, uid)
+
+def load_watchers(): return _load(WATCHERS_FILE, [])
+def save_watchers(w): _save(WATCHERS_FILE, w)
+
+
+# ---------- name resolution ----------
+
+_name_cache: dict[str, str] = {}
+
+def preload_names(client):
+    """Bulk-fetch all workspace users into the cache in one API call."""
+    try:
+        cursor = None
+        while True:
+            kwargs = {"limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = client.users_list(**kwargs)
+            for user in resp.get("members", []):
+                if user.get("deleted") or user.get("is_bot"):
+                    continue
+                profile = user.get("profile", {})
+                name = profile.get("display_name") or profile.get("real_name") or user["id"]
+                _name_cache[user["id"]] = name
+            cursor = resp.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+    except Exception as e:
+        print(f"[names] preload error: {e}")
+
+def resolve_name(client, user_id: str) -> str:
+    if user_id not in _name_cache:
+        try:
+            resp = client.users_info(user=user_id)
+            profile = resp["user"]["profile"]
+            _name_cache[user_id] = profile.get("display_name") or profile.get("real_name") or user_id
+        except Exception:
+            _name_cache[user_id] = user_id
+    return _name_cache[user_id]
 
 
 # ---------- helpers ----------
@@ -103,7 +177,7 @@ def get_reactors(client, channel: str, timestamp: str, emoji: str) -> list[str]:
     try:
         client.conversations_join(channel=channel)
     except Exception:
-        pass  # channel may be private or bot already a member — try anyway
+        pass
     resp = client.reactions_get(channel=channel, timestamp=timestamp, full=True)
     for reaction in resp["message"].get("reactions", []):
         if reaction["name"] == emoji:
@@ -121,17 +195,103 @@ def split_into_groups(users: list[str], n: int) -> list[list[str]]:
         groups[i % n].append(user)
     return groups
 
-def format_plan(plan) -> str:
+def get_user_group(user_id: str) -> int | None:
+    """Return the group_id of the channel this user is in, or None."""
+    for c in load_channels():
+        if user_id in c.get("participants", []) or user_id in c.get("mentors", []):
+            return c["group_id"]
+    return None
+
+def format_plan(plan, client=None) -> str:
     if not plan:
         return "No active plan. Run `/professor plan <N> <link> <emoji>` to create one."
-    lines = [f"*Plan — {len(plan['groups'])} groups, {sum(len(g['participants']) for g in plan['groups'])} participants:*"]
+    total = sum(len(g["participants"]) for g in plan["groups"])
+    lines = [f"*Plan — {len(plan['groups'])} groups, {total} participants:*"]
     for g in plan["groups"]:
-        mentor_str = fmt(g["mentors"]) if g["mentors"] else "_none assigned_"
+        if client:
+            p_str = ", ".join(resolve_name(client, u) for u in g["participants"])
+            m_str = ", ".join(resolve_name(client, u) for u in g["mentors"]) if g["mentors"] else "_none assigned_"
+        else:
+            p_str = fmt(g["participants"])
+            m_str = fmt(g["mentors"]) if g["mentors"] else "_none assigned_"
         lines.append(
-            f"\n*Group {g['id']}* ({len(g['participants'])} participants): {fmt(g['participants'])}"
-            f"\n  Mentors: {mentor_str}"
+            f"\n*Group {g['id']}* ({len(g['participants'])} participants): {p_str}"
+            f"\n  Mentors: {m_str}"
         )
     return "\n".join(lines)
+
+def build_canvas_md(group_id: int, participants: list[str], mentors: list[str]) -> str:
+    mentor_str = "  ".join(f"<@{u}>" for u in mentors) if mentors else "_None assigned_"
+    rows = []
+    for i in range(0, len(participants), 4):
+        rows.append("  ".join(f"<@{u}>" for u in participants[i:i+4]))
+    participant_str = "\n".join(rows)
+    return (
+        f"# Mentorship Group {group_id}\n\n"
+        f"## Mentors ({len(mentors)})\n{mentor_str}\n\n"
+        f"## Participants ({len(participants)})\n{participant_str}"
+    )
+
+
+# ---------- reaction watcher background flush ----------
+
+def flush_watchers_job():
+    """Runs every 5 minutes. Sends batched reaction DMs to admin."""
+    admin = load_admin()
+    if admin:
+        watchers = load_watchers()
+        changed = False
+        for w in watchers:
+            if w.get("pending"):
+                reactors = list(w["pending"])
+                w["pending"] = []
+                w.setdefault("seen", [])
+                w["seen"].extend(r for r in reactors if r not in w["seen"])
+                w["last_sent"] = datetime.now(timezone.utc).isoformat()
+                changed = True
+
+                lines = [f"*New :{w['emoji']}: reactions on <{w['link']}|watched message>:*"]
+                for uid in reactors:
+                    gid = get_user_group(uid)
+                    status = f"✓ already in Group {gid}" if gid else "✗ not in any group yet"
+                    lines.append(f"• <@{uid}> — {status}")
+
+                try:
+                    app.client.chat_postMessage(channel=admin, text="\n".join(lines))
+                except Exception as e:
+                    print(f"[watcher] DM error: {e}")
+
+        if changed:
+            save_watchers(watchers)
+
+    threading.Timer(300, flush_watchers_job).start()
+
+
+# ---------- event: reaction_added ----------
+
+@app.event("reaction_added")
+def handle_reaction_added(event):
+    if event.get("item", {}).get("type") != "message":
+        return
+
+    reaction = event.get("reaction", "")
+    user_id = event.get("user", "")
+    channel = event["item"]["channel"]
+    ts = event["item"]["ts"]
+
+    watchers = load_watchers()
+    changed = False
+    for w in watchers:
+        if w["channel"] == channel and w["timestamp"] == ts and w["emoji"] == reaction:
+            seen = w.get("seen", [])
+            pending = w.get("pending", [])
+            if user_id not in seen and user_id not in pending:
+                w.setdefault("pending", []).append(user_id)
+                changed = True
+            break
+
+    if changed:
+        save_watchers(watchers)
 
 
 # ---------- sub-handlers ----------
@@ -147,7 +307,6 @@ def handle_admin_cmd(parts: list[str], caller_id: str, respond):
             respond(text=f"Admin: <@{admin}> — added to every channel on launch.", response_type="ephemeral")
         return
 
-    # Only allow changes if no admin is set yet, or the caller is the current admin
     if admin and caller_id != admin:
         respond(text="Only the current admin can change admin settings.", response_type="ephemeral")
         return
@@ -160,7 +319,7 @@ def handle_admin_cmd(parts: list[str], caller_id: str, respond):
             respond(text="Mention a user: `/professor admin set @you`", response_type="ephemeral")
             return
         save_admin(users[0])
-        respond(text=f"Admin set to <@{users[0]}>. They'll be added to every channel on `/professor launch`.", response_type="ephemeral")
+        respond(text=f"Admin set to <@{users[0]}>.", response_type="ephemeral")
 
     elif sub == "clear":
         save_admin(None)
@@ -168,6 +327,73 @@ def handle_admin_cmd(parts: list[str], caller_id: str, respond):
 
     else:
         respond(text=f"Unknown admin subcommand `{sub}`.\n\n{USAGE}", response_type="ephemeral")
+
+
+def handle_watch_cmd(parts: list[str], respond):
+    subparts = parts[1:]
+    watchers = load_watchers()
+
+    if not subparts or subparts[0].lower() == "list":
+        if not watchers:
+            respond(text="No watched messages. Use `/professor watch <link> <emoji>` to add one.", response_type="ephemeral")
+            return
+        lines = [f"*Watching {len(watchers)} message(s) — DM sent every 5 min when new reactions arrive:*"]
+        for w in watchers:
+            seen = len(w.get("seen", []))
+            pending = len(w.get("pending", []))
+            lines.append(f"• :{w['emoji']}: on <{w['link']}|message> — {seen} notified, {pending} pending")
+        respond(text="\n".join(lines), response_type="ephemeral")
+        return
+
+    if subparts[0].lower() == "clear":
+        save_watchers([])
+        respond(text="All watchers cleared.", response_type="ephemeral")
+        return
+
+    if subparts[0].lower() == "remove":
+        if len(subparts) < 3:
+            respond(text="Usage: `/professor watch remove <link> <emoji>`", response_type="ephemeral")
+            return
+        link, emoji = subparts[1], subparts[2].strip(":")
+        channel, timestamp = parse_message_link(link)
+        updated = [w for w in watchers if not (w["channel"] == channel and w["timestamp"] == timestamp and w["emoji"] == emoji)]
+        if len(updated) == len(watchers):
+            respond(text="Not watching that message/emoji combination.", response_type="ephemeral")
+        else:
+            save_watchers(updated)
+            respond(text=f"Stopped watching :{emoji}: on that message.", response_type="ephemeral")
+        return
+
+    # /professor watch <link> <emoji>
+    if len(subparts) < 2:
+        respond(text="Usage: `/professor watch <message_link> <emoji>`", response_type="ephemeral")
+        return
+
+    link, emoji = subparts[0], subparts[1].strip(":")
+    channel, timestamp = parse_message_link(link)
+    if not channel or not timestamp:
+        respond(text="Could not parse the message link.", response_type="ephemeral")
+        return
+
+    for w in watchers:
+        if w["channel"] == channel and w["timestamp"] == timestamp and w["emoji"] == emoji:
+            respond(text=f"Already watching that message for :{emoji}: reactions.", response_type="ephemeral")
+            return
+
+    watchers.append({
+        "channel": channel,
+        "timestamp": timestamp,
+        "emoji": emoji,
+        "link": link,
+        "pending": [],
+        "seen": [],
+        "last_sent": None,
+    })
+    save_watchers(watchers)
+    respond(
+        text=f"Watching <{link}|message> for :{emoji}: reactions.\nYou'll be DM'd every 5 minutes with new reactors and whether they're already in a group.",
+        response_type="ephemeral",
+    )
 
 
 def handle_mentor_cmd(parts: list[str], respond):
@@ -225,7 +451,10 @@ def handle_plan_cmd(parts: list[str], client, respond):
     subparts = parts[1:]
 
     if not subparts or subparts[0].lower() == "show":
-        respond(text=format_plan(load_plan()), response_type="ephemeral")
+        plan = load_plan()
+        if plan:
+            preload_names(client)
+        respond(text=format_plan(plan, client), response_type="ephemeral")
         return
 
     if subparts[0].lower() == "clear":
@@ -233,7 +462,6 @@ def handle_plan_cmd(parts: list[str], client, respond):
         respond(text="Plan cleared.", response_type="ephemeral")
         return
 
-    # /professor plan <N> <link> <emoji>
     if len(subparts) < 3:
         respond(text="Usage: `/professor plan <N> <message_link> <emoji>`", response_type="ephemeral")
         return
@@ -270,8 +498,9 @@ def handle_plan_cmd(parts: list[str], client, respond):
         ],
     }
     save_plan(plan)
+    preload_names(client)
     respond(
-        text=f"Plan created: {n} groups, {len(participants)} participants.\n\n{format_plan(plan)}\n\nAssign mentors with `/professor assign <group#> @mentor1 @mentor2`",
+        text=f"Plan created: {n} groups, {len(participants)} participants.\n\n{format_plan(plan, client)}\n\nAssign mentors with `/professor assign <group#> @mentor1 @mentor2`",
         response_type="ephemeral",
     )
 
@@ -295,7 +524,6 @@ def handle_assign_cmd(parts: list[str], respond):
         respond(text="All mentor assignments cleared.", response_type="ephemeral")
         return
 
-    # /professor assign <group#> @mentor1 @mentor2
     try:
         group_num = int(subparts[0])
     except ValueError:
@@ -347,11 +575,27 @@ def handle_launch_cmd(parts: list[str], client, respond):
         try:
             result = client.conversations_create(name=name, is_private=True)
             cid = result["channel"]["id"]
-            # Invite admin first so they appear at the top and can be promoted to channel manager
+
             if admin:
                 client.conversations_invite(channel=cid, users=admin)
+
             members = [u for u in g["participants"] + g["mentors"] if u != admin]
-            client.conversations_invite(channel=cid, users=",".join(members))
+            if members:
+                client.conversations_invite(channel=cid, users=",".join(members))
+
+            # Create canvas with group info
+            try:
+                canvas_md = build_canvas_md(g["id"], g["participants"], g["mentors"])
+                client.api_call(
+                    "conversations.canvases.create",
+                    json={
+                        "channel_id": cid,
+                        "document_content": {"type": "markdown", "markdown": canvas_md},
+                    },
+                )
+            except Exception as ce:
+                print(f"[canvas] Group {g['id']}: {ce}")
+
             channels.append({
                 "channel_id": cid,
                 "channel_name": name,
@@ -406,13 +650,12 @@ def handle_channels_cmd(parts: list[str], client, respond):
         save_channels([])
         lines = []
         if archived:
-            lines.append(f"Archived: " + ", ".join(f"`{n}`" for n in archived))
+            lines.append("Archived: " + ", ".join(f"`{n}`" for n in archived))
         if errors:
             lines.append("Errors:\n" + "\n".join(errors))
         respond(text="\n".join(lines), response_type="ephemeral")
 
     elif sub == "add":
-        # /professor channels add @user <group#>
         if len(subparts) < 3:
             respond(text="Usage: `/professor channels add @user <group#>`", response_type="ephemeral")
             return
@@ -436,7 +679,6 @@ def handle_channels_cmd(parts: list[str], client, respond):
             respond(text=f"Error: {e}", response_type="ephemeral")
 
     elif sub == "kick":
-        # /professor channels kick @user <group#>
         if len(subparts) < 3:
             respond(text="Usage: `/professor channels kick @user <group#>`", response_type="ephemeral")
             return
@@ -568,21 +810,6 @@ def handle_reaction_cmd(mode: str, parts: list[str], client, respond):
     respond(text=out, response_type="ephemeral")
 
 
-_ERROR_PREFIXES = (
-    "Error", "Usage", "No active plan", "No channels", "No bot",
-    "No mentors", "Could not", "Mention at least", "Unknown",
-    "Warning", "Only the current", "Only the admin", "Group ",
-    "Groups ", "Exclude list is empty", "The exclude list",
-)
-
-def _wrap_respond(base_respond, raw_text: str):
-    def wrapped(text="", **kwargs):
-        if any(text.startswith(p) for p in _ERROR_PREFIXES):
-            text = f"{text}\n_Command:_ `/professor {raw_text}`"
-        base_respond(text=text, **kwargs)
-    return wrapped
-
-
 # ---------- main dispatch ----------
 
 @app.command("/professor")
@@ -600,7 +827,7 @@ def handle_professor(ack, command, client, respond):
     mode = parts[0].lower()
     admin = load_admin()
 
-    # admin show is always public
+    # /professor admin show is always public
     if not (mode == "admin" and (not parts[1:] or parts[1].lower() == "show")):
         if admin and caller_id != admin:
             respond(text=f"Only the admin (<@{admin}>) can use this bot.", response_type="ephemeral")
@@ -609,6 +836,8 @@ def handle_professor(ack, command, client, respond):
     try:
         if mode == "admin":
             handle_admin_cmd(parts, caller_id, respond)
+        elif mode == "watch":
+            handle_watch_cmd(parts, respond)
         elif mode == "mentor":
             handle_mentor_cmd(parts, respond)
         elif mode == "plan":
@@ -630,4 +859,5 @@ def handle_professor(ack, command, client, respond):
 
 
 if __name__ == "__main__":
+    threading.Timer(300, flush_watchers_job).start()
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()

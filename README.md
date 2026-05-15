@@ -1,163 +1,253 @@
-# nuclear — Slack Group Channel Creator
+# professor-bot
 
-A Slack bot that takes emoji reactors from a message, splits them into groups, lets you assign mentors, and creates a private channel for each group.
+Automates Hack Club mentorship program logistics: collects emoji-reaction signups, splits participants into balanced groups, assigns mentors, creates private group channels with canvases, and watches for new signups.
 
 ---
 
-## Setup
+## Slack app manifest
 
-### 1. Environment variables
+```yaml
+display_information:
+  name: Professor
+  description: Mentorship group channel manager
 
-Create a `.env` file in the project root:
+features:
+  bot_user:
+    display_name: Professor
+    always_online: true
+  slash_commands:
+    - command: /professor
+      description: Manage mentorship group channels
+      usage_hint: "[plan|assign|launch|watch|mentor|channels|exclude|admin|list|random|groups] ..."
+      should_escape: true
 
-```env
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
+oauth_config:
+  scopes:
+    bot:
+      - commands
+      - reactions:read
+      - channels:join
+      - groups:write
+      - channels:manage
+      - chat:write
+      - im:write
+      - users:read
+      - canvases:write
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - reaction_added
+  socket_mode_enabled: true
+  token_rotation_enabled: false
 ```
 
-- **`SLACK_BOT_TOKEN`** — Bot OAuth token from your Slack app's *OAuth & Permissions* page.
-- **`SLACK_APP_TOKEN`** — App-level token with `connections:write` scope (*Basic Information → App-Level Tokens*). Required for Socket Mode.
+**`should_escape: true`** is required — without it, Slack sends `@Tanuki` as plain text and the bot can't parse it as a user mention.
 
-### 2. Slack app permissions
+---
 
-| Scope | Why |
-| --- | --- |
-| `commands` | Register the `/professor` slash command |
-| `reactions:read` | Read emoji reactions on messages |
-| `channels:join` | Join public channels to read reactions |
-| `groups:write` | Create private channels and invite members |
-| `channels:manage` | Archive channels |
+## plan.json formats
 
-Enable **Socket Mode** in your Slack app settings.
+The bot accepts two formats. You can paste either directly into `plan.json` on Nest.
 
-### 3. Install and run
+**Bot-generated format** (what `/professor plan` produces):
 
-```bash
-uv sync
-python app.py
+```json
+{
+  "created_at": "2024-...",
+  "source": {"link": "https://...", "emoji": "fallout-cat"},
+  "groups": [
+    {"id": 1, "participants": ["U123", "U456"], "mentors": []},
+    {"id": 2, "participants": ["U789", "U012"], "mentors": []}
+  ]
+}
 ```
+
+**Hand-crafted format** (easier to write manually — what the handoff doc uses):
+
+```json
+{
+  "groups": {
+    "1": {"participants": ["U123", "U456"], "mentors": []},
+    "2": {"participants": ["U789", "U012"], "mentors": []}
+  }
+}
+```
+
+Both are loaded identically. The bot normalizes the dict format to a list internally.
 
 ---
 
 ## Typical workflow
 
 ```text
-1. /professor mentor set @alice @bob @carol @dan   ← set your mentor pool
-2. /professor plan 8 <message_link> :fallout-cat:  ← split reactors into 8 groups
-3. /professor assign 1 @alice @bob                 ← pick 2 mentors per group
-   /professor assign 2 @carol @dan
-   ...
-4. /professor launch gc                            ← creates #gc-group-1 … #gc-group-8
+1. /professor admin set @you
+   /professor mentor set @mentor1 @mentor2 @mentor3 …
+   /professor exclude add @organizer1 @organizer2 …
+
+2. /professor watch <signup_message_link> :fallout-cat:
+   → you'll be DM'd every 5 min with new reactors + whether they're already in a group
+
+3. /professor plan 12 <signup_message_link> :fallout-cat:
+   → splits reactors (minus excluded) into 12 random groups
+   → OR paste a hand-crafted plan.json directly on Nest for pre-balanced groups
+
+4. /professor plan show
+   → shows all groups with real display names
+
+5. /professor assign 1 @mentor1 @mentor2
+   /professor assign 2 @mentor3 @mentor4
+   … repeat for each group (2 mentors preferred, 3 if needed)
+
+6. /professor launch gc
+   → creates #gc-group-1 … #gc-group-12
+   → invites admin first, then participants + mentors
+   → creates a canvas in each channel with group roster
 ```
-
-Participants are everyone who reacted with the given emoji, minus anyone on the [exclude list](#exclude-list).
-
-**Mentor count:** prefer 2 per group, 3 is fine when needed. The bot warns you if you assign more than 3.
 
 ---
 
 ## Commands
 
-### Reaction lookups (quick, no state saved)
+### Admin
 
-```text
-/professor list   <link> <emoji> [--exclude @u …]
-/professor random <link> <emoji> [--exclude @u …]
-/professor groups <N> <link> <emoji> [--exclude @u …]
-```
+Only the admin can run any command. `/professor admin show` is public so anyone can see who to contact.
 
-These are read-only previews. `--exclude` here *does* persist the excluded users for future commands.
+| Command | What it does |
+| --- | --- |
+| `/professor admin set @you` | Set the admin (first-time only, or current admin) |
+| `/professor admin show` | Show who the admin is |
+| `/professor admin clear` | Remove the admin |
 
----
-
-### Group channel workflow
-
-#### `/professor plan <N> <link> <emoji>`
-
-Fetch reactors, remove excluded users, split into N random groups, and save the plan.
-
-```text
-/professor plan 8 https://hackclub.slack.com/archives/C0ACG0XQWGN/p177… fallout-cat
-```
-
-#### `/professor plan show`
-
-Show the current saved plan with participants and any mentor assignments.
-
-#### `/professor plan clear`
-
-Discard the current plan.
-
-#### `/professor assign <group#> @mentor1 @mentor2`
-
-Assign mentors to a specific group. You can run this as many times as needed — it only touches that one group, so adding or swapping a mentor never re-randomizes anyone else.
-
-```text
-/professor assign 3 @alice @bob
-/professor assign 3 @alice @bob @carol   ← update to 3 mentors if needed
-```
-
-#### `/professor assign show`
-
-Show the full plan including current mentor assignments.
-
-#### `/professor assign clear`
-
-Clear all mentor assignments without touching participant groups.
-
-#### `/professor launch [prefix]`
-
-Create a private Slack channel for every group that has mentors assigned, and invite all participants + mentors. Channel names default to `gc-group-1`, `gc-group-2`, etc. Pass a custom prefix:
-
-```text
-/professor launch cohort2
-```
-
-Creates `#cohort2-group-1`, `#cohort2-group-2`, …
+To become channel manager in a group channel: open it → click your name → **Make channel manager**.
 
 ---
 
-### Mentor list
+### Reaction watcher
 
-The mentor list is a stored reference — it doesn't auto-assign anyone. Use it to keep track of who your mentors are, then manually assign them to groups with `/professor assign`.
+Watch a signup message and get DM'd every 5 minutes with new reactors. Each DM tells you whether the reactor is already in a group channel or not — useful for monitoring late signups mid-program.
+
+New reactors are deduplicated: you're only notified once per person per watcher.
+
+| Command | What it does |
+| --- | --- |
+| `/professor watch <link> <emoji>` | Start watching a message |
+| `/professor watch list` | Show active watchers (seen count, pending count) |
+| `/professor watch remove <link> <emoji>` | Stop watching one message |
+| `/professor watch clear` | Remove all watchers |
+
+**Example DM you'll receive:**
 
 ```text
-/professor mentor list
-/professor mentor add @alice @bob
-/professor mentor remove @alice
-/professor mentor set @alice @bob @carol @dan   ← replaces the entire list
-/professor mentor clear
+New :fallout-cat: reactions on watched message:
+• @alice — ✗ not in any group yet
+• @bob — ✓ already in Group 3
 ```
+
+---
+
+### Plan
+
+Fetches emoji reactors, removes excluded users, splits into N random groups, and saves to `plan.json`.
+
+| Command | What it does |
+| --- | --- |
+| `/professor plan <N> <link> <emoji>` | Create N random groups from reactors |
+| `/professor plan show` | Show plan with real display names (fetches from Slack) |
+| `/professor plan clear` | Discard the current plan |
+
+**Loading a hand-crafted plan:** SSH into Nest, `nano plan.json`, paste your JSON in the dict format above, save. The bot loads it automatically on next command.
+
+---
+
+### Assign mentors
+
+Manually assign mentors to each group. Re-running on the same group overwrites only that group — other groups are untouched.
+
+| Command | What it does |
+| --- | --- |
+| `/professor assign <group#> @mentor1 @mentor2` | Set mentors for a group (warns if >3) |
+| `/professor assign show` | Show full plan with current assignments |
+| `/professor assign clear` | Clear all mentor assignments |
+
+---
+
+### Launch
+
+Creates a private Slack channel for every group that has mentors assigned. Admin is invited first (for channel manager promotion), then participants and mentors. A **canvas** is created in each channel with the group roster.
+
+```text
+/professor launch [prefix]
+```
+
+Default prefix is `gc` → channels named `#gc-group-1`, `#gc-group-2`, etc.
+
+All groups must have mentors assigned before launch will run.
 
 ---
 
 ### Channel management
 
-Once channels are created via `/professor launch`, you can manage them:
+| Command | What it does |
+| --- | --- |
+| `/professor channels list` | List all bot-created channels |
+| `/professor channels add @u <group#>` | Add someone to a group's channel |
+| `/professor channels kick @u <group#>` | Remove someone from a group's channel |
+| `/professor channels archive` | Archive all bot-created channels |
+
+**Adding a mentor after channels are created:**
 
 ```text
-/professor channels list                   ← show all bot-created channels
-/professor channels add @user <group#>     ← add someone to a group's channel
-/professor channels kick @user <group#>    ← remove someone from a group's channel
-/professor channels archive                ← archive all bot-created channels
+/professor assign 3 @newmentor        ← update the plan
+/professor channels add @newmentor 3  ← add to the channel
 ```
 
-**Adding a mentor after launch:** just run `/professor assign <group#> @newmentor` to update the plan, then `/professor channels add @newmentor <group#>` to actually add them to the channel. No other groups are affected.
+---
+
+### Mentor list
+
+Adding a mentor automatically adds them to the exclude list so they don't appear as participants when running `/professor plan`.
+
+| Command | What it does |
+| --- | --- |
+| `/professor mentor set @u1 @u2 …` | Replace entire mentor list (also excludes all) |
+| `/professor mentor add @u …` | Add mentors (also excludes them) |
+| `/professor mentor remove @u …` | Remove from mentor list |
+| `/professor mentor list` | Show stored mentors |
+| `/professor mentor clear` | Clear mentor list |
 
 ---
 
 ### Exclude list
 
-Users on the exclude list are silently filtered from all `plan`, `list`, `random`, and `groups` commands.
+Excluded users are silently filtered from all `plan`, `list`, `random`, and `groups` commands.
+
+| Command | What it does |
+| --- | --- |
+| `/professor exclude` | Show excluded users |
+| `/professor exclude add @u …` | Add to exclude list |
+| `/professor exclude remove @u …` | Remove from exclude list |
+| `/professor exclude clear` | Clear the exclude list |
+
+Inline exclusion (also saves to persist list):
 
 ```text
-/professor exclude                  ← show excluded users
-/professor exclude add @alice @bob
-/professor exclude remove @alice
-/professor exclude clear
+/professor groups 3 <link> thumbsup --exclude @alice @bob
 ```
 
-Using `--exclude @user` inline on any reaction command also adds those users to the persistent list.
+---
+
+### Quick lookups
+
+Read-only, no state saved.
+
+| Command | What it does |
+| --- | --- |
+| `/professor list <link> <emoji>` | List all reactors |
+| `/professor random <link> <emoji>` | List reactors in random order |
+| `/professor groups <N> <link> <emoji>` | Preview N groups without saving a plan |
+
+All support `--exclude @u …` at the end.
 
 ---
 
@@ -165,9 +255,10 @@ Using `--exclude @user` inline on any reaction command also adds those users to 
 
 | File | Contents |
 | --- | --- |
-| `exclude_list.json` | Array of excluded Slack user IDs |
-| `mentors.json` | Array of mentor Slack user IDs |
-| `plan.json` | Current group plan (participants + mentor assignments) |
-| `channels.json` | Log of every channel created by `/professor launch` |
-
-All files persist across bot restarts.
+| `.env` | Slack tokens — never commit |
+| `admin.json` | Admin user ID |
+| `mentors.json` | Mentor user IDs |
+| `exclude_list.json` | Excluded user IDs |
+| `plan.json` | Current group plan — accepts both formats |
+| `channels.json` | All channels created by `/professor launch` |
+| `watchers.json` | Active reaction watchers |
