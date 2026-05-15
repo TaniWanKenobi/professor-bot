@@ -234,38 +234,44 @@ def build_canvas_md(group_id: int, participants: list[str], mentors: list[str]) 
     )
 
 
-# ---------- reaction watcher background flush ----------
+# ---------- reaction watcher background flush (24h) ----------
 
 def flush_watchers_job():
-    """Runs every 5 minutes. Sends batched reaction DMs to admin."""
+    """Runs every 24 hours. Re-checks all reactors live and DMs admin about anyone not yet in a group."""
     admin = load_admin()
     if admin:
         watchers = load_watchers()
-        changed = False
+        excluded = load_exclude_list()
+
         for w in watchers:
-            if w.get("pending"):
-                reactors = list(w["pending"])
-                w["pending"] = []
-                w.setdefault("seen", [])
-                w["seen"].extend(r for r in reactors if r not in w["seen"])
-                w["last_sent"] = datetime.now(timezone.utc).isoformat()
-                changed = True
+            try:
+                resp = app.client.reactions_get(channel=w["channel"], timestamp=w["timestamp"], full=True)
+                all_reactors = []
+                for reaction in resp["message"].get("reactions", []):
+                    if reaction["name"] == w["emoji"]:
+                        all_reactors = reaction["users"]
+                        break
 
-                lines = [f"*New :{w['emoji']}: reactions on <{w['link']}|watched message>:*"]
-                for uid in reactors:
-                    gid = get_user_group(uid)
-                    status = f"✓ already in Group {gid}" if gid else "✗ not in any group yet"
-                    lines.append(f"• <@{uid}> — {status}")
+                unplaced = [u for u in all_reactors if u not in excluded and not get_user_group(u)]
 
-                try:
+                if unplaced:
+                    lines = [
+                        f"*24h reminder — :{w['emoji']}: reactors not yet in a group ({len(unplaced)}):*",
+                        f"_<{w['link']}|View message>_",
+                    ]
+                    for uid in unplaced:
+                        lines.append(f"• <@{uid}> ({uid})")
+                    lines.append(f"\nUse `/professor channels add @user <group#>` to add them.")
                     app.client.chat_postMessage(channel=admin, text="\n".join(lines))
-                except Exception as e:
-                    print(f"[watcher] DM error: {e}")
+                else:
+                    app.client.chat_postMessage(
+                        channel=admin,
+                        text=f"✓ All :{w['emoji']}: reactors on <{w['link']}|watched message> are in a group.",
+                    )
+            except Exception as e:
+                print(f"[watcher] flush error: {e}")
 
-        if changed:
-            save_watchers(watchers)
-
-    threading.Timer(300, flush_watchers_job).start()
+    threading.Timer(86400, flush_watchers_job).start()
 
 
 # ---------- event: reaction_added ----------
@@ -834,6 +840,54 @@ def handle_reaction_cmd(mode: str, parts: list[str], client, respond):
     respond(text=out, response_type="ephemeral")
 
 
+def handle_audit_cmd(parts: list[str], client, respond):
+    if len(parts) < 3:
+        respond(text="Usage: `/professor audit <message_link> <emoji>`", response_type="ephemeral")
+        return
+
+    message_link, emoji = parts[1], parts[2].strip(":")
+    channel, timestamp = parse_message_link(message_link)
+    if not channel or not timestamp:
+        respond(text="Could not parse the message link.", response_type="ephemeral")
+        return
+
+    excluded = load_exclude_list()
+    reactors = [u for u in get_reactors(client, channel, timestamp, emoji) if u not in excluded]
+
+    if not reactors:
+        respond(text=f"No :{emoji}: reactors found (or all are excluded).", response_type="ephemeral")
+        return
+
+    missing, placed = [], []
+    for uid in reactors:
+        gid = get_user_group(uid)
+        if gid:
+            placed.append((uid, gid))
+        else:
+            missing.append(uid)
+
+    lines = [f"*Audit: :{emoji}: reactors ({len(reactors)} total, {len(excluded)} excluded)*"]
+    lines.append(f"✓ In a channel: {len(placed)}  |  ✗ Missing: {len(missing)}")
+
+    if missing:
+        lines.append(f"\n*Not in any group channel ({len(missing)}):*")
+        lines.append("\n".join(f"• {fmt_user(u)}" for u in missing))
+
+    # Per-channel participant counts (excluding mentors and admin)
+    channels = load_channels()
+    if channels:
+        mentors = set(load_mentors())
+        admin = load_admin()
+        if admin:
+            mentors.add(admin)
+        lines.append("\n*Participants per channel (excl. mentors & admin):*")
+        for c in sorted(channels, key=lambda x: x["group_id"]):
+            count = sum(1 for p in c["participants"] if p not in mentors)
+            lines.append(f"• <#{c['channel_id']}> (Group {c['group_id']}): {count} participants")
+
+    respond(text="\n".join(lines), response_type="ephemeral")
+
+
 # ---------- main dispatch ----------
 
 @app.command("/professor")
@@ -872,6 +926,8 @@ def handle_professor(ack, command, client, respond):
             handle_launch_cmd(parts, client, respond)
         elif mode == "channels":
             handle_channels_cmd(parts, client, respond)
+        elif mode == "audit":
+            handle_audit_cmd(parts, client, respond)
         elif mode == "exclude":
             handle_exclude_cmd(parts, respond)
         elif mode in ("list", "random", "groups"):
@@ -883,5 +939,5 @@ def handle_professor(ack, command, client, respond):
 
 
 if __name__ == "__main__":
-    threading.Timer(300, flush_watchers_job).start()
+    threading.Timer(86400, flush_watchers_job).start()
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
