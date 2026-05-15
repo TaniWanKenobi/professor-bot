@@ -633,6 +633,33 @@ def handle_channels_cmd(parts: list[str], client, respond):
 
     sub = subparts[0].lower()
 
+    if sub == "addadmin":
+        admin = load_admin()
+        if not admin:
+            respond(text="No admin set. Use `/professor admin set @you` first.", response_type="ephemeral")
+            return
+        if not channels:
+            respond(text="No bot-created channels yet.", response_type="ephemeral")
+            return
+        added, errors = [], []
+        for c in channels:
+            try:
+                client.conversations_invite(channel=c["channel_id"], users=admin)
+                added.append(f"<#{c['channel_id']}>")
+            except Exception as e:
+                err = str(e)
+                if "already_in_channel" in err:
+                    added.append(f"<#{c['channel_id']}> (already in)")
+                else:
+                    errors.append(f"<#{c['channel_id']}>: {err}")
+        lines = []
+        if added:
+            lines.append(f"Added <@{admin}> to {len(added)} channel(s): " + "  ".join(added))
+        if errors:
+            lines.append("Errors:\n" + "\n".join(errors))
+        respond(text="\n".join(lines), response_type="ephemeral")
+        return
+
     if sub == "archive":
         if not channels:
             respond(text="No channels to archive.", response_type="ephemeral")
