@@ -704,7 +704,25 @@ def handle_channels_cmd(parts: list[str], client, respond):
             return
         try:
             client.conversations_invite(channel=ch["channel_id"], users=",".join(user_ids))
-            respond(text=f"Added {fmt(user_ids)} to <#{ch['channel_id']}>.", response_type="ephemeral")
+
+            # Update channels.json
+            for new_uid in user_ids:
+                if new_uid not in ch["participants"] and new_uid not in ch.get("mentors", []):
+                    ch["participants"].append(new_uid)
+            save_channels(channels)
+
+            # Update plan.json
+            plan = load_plan()
+            if plan:
+                for g in plan["groups"]:
+                    if g["id"] == group_num:
+                        for new_uid in user_ids:
+                            if new_uid not in g["participants"] and new_uid not in g["mentors"]:
+                                g["participants"].append(new_uid)
+                        break
+                save_plan(plan)
+
+            respond(text=f"Added {fmt(user_ids)} to <#{ch['channel_id']}> and updated the plan.", response_type="ephemeral")
         except Exception as e:
             respond(text=f"Error: {e}", response_type="ephemeral")
 
