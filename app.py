@@ -468,7 +468,7 @@ def handle_watch_cmd(parts: list[str], respond):
     })
     save_watchers(watchers)
     respond(
-        text=f"Watching <{link}|message> for :{emoji}: reactions.\nYou'll be DM'd every 5 minutes with new reactors and whether they're already in a group.",
+        text=f"Watching <{link}|message> for :{emoji}: reactions.\nYou'll be DM'd every 24 hours with anyone who reacted but isn't in a group yet.",
         response_type="ephemeral",
     )
 
