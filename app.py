@@ -928,12 +928,14 @@ def handle_reaction_cmd(mode: str, parts: list[str], client, respond):
     respond(text=out, response_type="ephemeral")
 
 
+DEFAULT_AUDIT_LINK = "https://hackclub.slack.com/archives/C0ACG0XQWGN/p1777315115802199"
+DEFAULT_AUDIT_EMOJI = "fallout-cat"
+
 def handle_audit_cmd(parts: list[str], client, respond):
     if len(parts) < 3:
-        respond(text="Usage: `/professor audit <message_link> <emoji>`", response_type="ephemeral")
-        return
-
-    message_link, emoji = parts[1], parts[2].strip(":")
+        message_link, emoji = DEFAULT_AUDIT_LINK, DEFAULT_AUDIT_EMOJI
+    else:
+        message_link, emoji = parts[1], parts[2].strip(":")
     channel, timestamp = parse_message_link(message_link)
     if not channel or not timestamp:
         respond(text="Could not parse the message link.", response_type="ephemeral")
