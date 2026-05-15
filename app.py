@@ -709,6 +709,37 @@ def handle_channels_cmd(parts: list[str], client, respond):
 
     sub = subparts[0].lower()
 
+    if sub == "rename":
+        if not channels:
+            respond(text="No bot-created channels yet.", response_type="ephemeral")
+            return
+        names = [
+            "hideout-一", "hideout-二", "hideout-三", "hideout-四",
+            "hideout-五", "hideout-六", "hideout-七", "hideout-八",
+            "hideout-九", "hideout-十", "hideout-十一", "hideout-十二",
+        ]
+        renamed, errors = [], []
+        for c in sorted(channels, key=lambda x: x["group_id"]):
+            idx = c["group_id"] - 1
+            if idx >= len(names):
+                errors.append(f"Group {c['group_id']}: no name defined")
+                continue
+            new_name = names[idx]
+            try:
+                client.conversations_rename(channel=c["channel_id"], name=new_name)
+                c["channel_name"] = new_name
+                renamed.append(f"<#{c['channel_id']}> → `{new_name}`")
+            except Exception as e:
+                errors.append(f"Group {c['group_id']}: {e}")
+        save_channels(channels)
+        lines = []
+        if renamed:
+            lines.append("*Renamed:*\n" + "\n".join(renamed))
+        if errors:
+            lines.append("*Errors:*\n" + "\n".join(errors))
+        respond(text="\n".join(lines) or "Nothing renamed.", response_type="ephemeral")
+        return
+
     if sub == "addadmin":
         admin = load_admin()
         if not admin:
