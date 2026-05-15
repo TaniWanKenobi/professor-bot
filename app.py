@@ -301,6 +301,39 @@ def handle_reaction_added(event):
         save_watchers(watchers)
 
 
+# ---------- event: member_joined_channel ----------
+
+@app.event("member_joined_channel")
+def handle_member_joined(event):
+    user_id = event.get("user")
+    channel_id = event.get("channel")
+    if not user_id or not channel_id:
+        return
+
+    channels = load_channels()
+    ch = next((c for c in channels if c["channel_id"] == channel_id), None)
+    if not ch:
+        return  # not a bot-managed channel
+
+    group_num = ch["group_id"]
+    changed_channels = False
+    if user_id not in ch["participants"] and user_id not in ch.get("mentors", []):
+        ch["participants"].append(user_id)
+        changed_channels = True
+
+    if changed_channels:
+        save_channels(channels)
+
+    plan = load_plan()
+    if plan:
+        for g in plan["groups"]:
+            if g["id"] == group_num:
+                if user_id not in g["participants"] and user_id not in g["mentors"]:
+                    g["participants"].append(user_id)
+                    save_plan(plan)
+                break
+
+
 # ---------- sub-handlers ----------
 
 def handle_admin_cmd(parts: list[str], caller_id: str, respond):
