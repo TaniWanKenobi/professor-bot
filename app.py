@@ -23,7 +23,7 @@ USAGE = (
     "*`/professor` — mentorship group channel manager*\n\n"
     "*Admin:*\n"
     "• `/professor admin set @you` — set admin (only admin can run all other commands)\n"
-    "• `/professor admin show` — show current admin\n"
+    "• `/professor admin show` — show current admin (public)\n"
     "• `/professor admin clear` — clear admin\n\n"
     "*Reaction lookups:*\n"
     "• `/professor list <link> <emoji> [--exclude @u …]` — list reactors\n"
@@ -31,28 +31,38 @@ USAGE = (
     "• `/professor groups <N> <link> <emoji> [--exclude @u …]` — preview N random groups\n\n"
     "*Group channel workflow:*\n"
     "• `/professor plan <N> <link> <emoji>` — split reactors into N groups & save\n"
-    "• `/professor plan show` — show plan with display names\n"
+    "• `/professor plan show` — show plan with @mentions and Slack IDs\n"
     "• `/professor plan clear` — discard plan\n"
     "• `/professor assign <group#> @mentor1 @mentor2` — assign mentors (2 preferred, 3 if needed)\n"
-    "• `/professor assign show` — show assignments\n"
+    "• `/professor assign show` — show current assignments\n"
     "• `/professor assign clear` — clear all assignments\n"
-    "• `/professor launch [prefix]` — create private channels, invite everyone, create canvas\n\n"
-    "*Reaction watcher (DMs you when people react):*\n"
+    "• `/professor launch [prefix]` — create private channels, set topic, create canvas, invite everyone\n\n"
+    "*Reaction watcher (DMs you every 24h about unplaced reactors):*\n"
     "• `/professor watch <link> <emoji>` — watch a message for reactions\n"
     "• `/professor watch list` — show active watchers\n"
-    "• `/professor watch remove <link> <emoji>` — stop watching\n"
+    "• `/professor watch run` — manually trigger the 24h check now\n"
+    "• `/professor watch remove <link> <emoji>` — stop watching a message\n"
     "• `/professor watch clear` — remove all watchers\n\n"
+    "*Audit:*\n"
+    "• `/professor audit` — check who reacted but isn't in any channel (defaults to signup message)\n"
+    "• `/professor audit <link> <emoji>` — audit a custom message\n\n"
     "*Mentor list:*\n"
     "• `/professor mentor list` — show mentors\n"
-    "• `/professor mentor add @u …` — add mentors (auto-excluded from participant pool)\n"
+    "• `/professor mentor add @u …` — add mentors (auto-added to exclude list)\n"
     "• `/professor mentor remove @u …` — remove mentors\n"
     "• `/professor mentor set @u1 @u2 …` — replace entire list\n"
     "• `/professor mentor clear` — clear list\n\n"
     "*Channel management:*\n"
     "• `/professor channels list` — list bot-created channels\n"
-    "• `/professor channels add @u <group#>` — add someone to a group's channel\n"
+    "• `/professor channels add @u <group#>` — add someone to a group's channel & plan\n"
     "• `/professor channels kick @u <group#>` — remove someone from a group's channel\n"
+    "• `/professor channels sync` — pull live Slack members into plan (fixes manual additions)\n"
+    "• `/professor channels addadmin` — add admin to all channels\n"
+    "• `/professor channels settopic` — set mentor names as topic on all channels\n"
+    "• `/professor channels rename` — rename channels to Hideout-一 … Hideout-十二\n"
     "• `/professor channels archive` — archive all bot-created channels\n\n"
+    "*Announce:*\n"
+    "• `/professor announce <message>` — post a message to all bot-created channels\n\n"
     "*Exclude list:*\n"
     "• `/professor exclude` — show excluded users\n"
     "• `/professor exclude add @u …` — add (also works inline with `--exclude`)\n"
@@ -243,6 +253,35 @@ def _do_watcher_flush():
         return
     watchers = load_watchers()
     excluded = load_exclude_list()
+    bot_channels = load_channels()
+    mentors_set = set(load_mentors())
+
+    # Build live participant counts per channel
+    channel_counts: dict[int, int] = {}
+    for c in bot_channels:
+        try:
+            cursor = None
+            members = []
+            while True:
+                kwargs = {"channel": c["channel_id"], "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = app.client.conversations_members(**kwargs)
+                members.extend(resp.get("members", []))
+                cursor = resp.get("response_metadata", {}).get("next_cursor")
+                if not cursor:
+                    break
+            channel_counts[c["group_id"]] = sum(
+                1 for u in members if u not in mentors_set and u != admin
+            )
+        except Exception:
+            channel_counts[c["group_id"]] = -1
+
+    channel_summary = "\n".join(
+        f"  • <#{c['channel_id']}> Group {c['group_id']}: {channel_counts.get(c['group_id'], '?')} mentees"
+        for c in sorted(bot_channels, key=lambda x: x["group_id"])
+    )
+
     for w in watchers:
         try:
             resp = app.client.reactions_get(channel=w["channel"], timestamp=w["timestamp"], full=True)
@@ -259,12 +298,13 @@ def _do_watcher_flush():
                 ]
                 for uid in unplaced:
                     lines.append(f"• <@{uid}> ({uid})")
+                lines.append(f"\n*Current mentee counts per channel:*\n{channel_summary}")
                 lines.append(f"\nUse `/professor channels add @user <group#>` to add them.")
                 app.client.chat_postMessage(channel=admin, text="\n".join(lines))
             else:
                 app.client.chat_postMessage(
                     channel=admin,
-                    text=f"✓ All :{w['emoji']}: reactors on <{w['link']}|watched message> are in a group.",
+                    text=f"✓ All :{w['emoji']}: reactors on <{w['link']}|watched message> are in a group.\n\n*Mentee counts:*\n{channel_summary}",
                 )
         except Exception as e:
             print(f"[watcher] flush error: {e}")
