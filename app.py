@@ -1271,6 +1271,8 @@ def handle_professor(ack, command, client, respond):
             handle_channels_cmd(parts, client, respond)
         elif mode == "audit":
             handle_audit_cmd(parts, client, respond)
+        elif mode == "announce":
+            handle_announce_cmd(parts, client, respond)
         elif mode == "exclude":
             handle_exclude_cmd(parts, respond)
         elif mode in ("list", "random", "groups"):
