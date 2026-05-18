@@ -37,7 +37,7 @@ USAGE = (
     "• `/professor assign show` — show current assignments\n"
     "• `/professor assign clear` — clear all assignments\n"
     "• `/professor launch [prefix]` — create private channels, set topic, create canvas, invite everyone\n\n"
-    "*Reaction watcher (DMs you every 24h about unplaced reactors):*\n"
+    "*Reaction watcher (DMs you every 24h about unplaced reactors + mentee counts per channel):*\n"
     "• `/professor watch <link> <emoji>` — watch a message for reactions\n"
     "• `/professor watch list` — show active watchers\n"
     "• `/professor watch run` — manually trigger the 24h check now\n"

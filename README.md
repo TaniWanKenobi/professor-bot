@@ -1,6 +1,6 @@
 # professor-bot
 
-Automates Hack Club mentorship program logistics: collects emoji-reaction signups, splits participants into balanced groups, assigns mentors, creates private group channels with canvases, and watches for new signups.
+Automates Hack Club mentorship program logistics: collects emoji-reaction signups, splits participants into balanced groups, assigns mentors, creates private group channels with canvases and topics, watches for new signups, and keeps everything in sync.
 
 ---
 
@@ -18,7 +18,7 @@ features:
   slash_commands:
     - command: /professor
       description: Manage mentorship group channels
-      usage_hint: "[plan|assign|launch|watch|mentor|channels|exclude|admin|list|random|groups] ..."
+      usage_hint: "[plan|assign|launch|watch|audit|announce|mentor|channels|exclude|admin|list|random|groups] ..."
       should_escape: true
 
 oauth_config:
@@ -44,13 +44,13 @@ settings:
   token_rotation_enabled: false
 ```
 
-**`should_escape: true`** is required — without it, Slack sends `@Tanuki` as plain text and the bot can't parse it as a user mention.
+**`should_escape: true`** is required — without it, Slack sends `@mentions` as plain text and the bot can't parse them as user IDs.
 
 ---
 
 ## plan.json formats
 
-The bot accepts two formats. You can paste either directly into `plan.json` on Nest.
+The bot accepts two formats. Paste either directly into `plan.json` on Nest.
 
 **Bot-generated format** (what `/professor plan` produces):
 
@@ -65,7 +65,7 @@ The bot accepts two formats. You can paste either directly into `plan.json` on N
 }
 ```
 
-**Hand-crafted format** (easier to write manually — what the handoff doc uses):
+**Hand-crafted format** (easier to write manually):
 
 ```json
 {
@@ -76,7 +76,7 @@ The bot accepts two formats. You can paste either directly into `plan.json` on N
 }
 ```
 
-Both are loaded identically. The bot normalizes the dict format to a list internally.
+Both are loaded identically.
 
 ---
 
@@ -84,27 +84,26 @@ Both are loaded identically. The bot normalizes the dict format to a list intern
 
 ```text
 1. /professor admin set @you
-   /professor mentor set @mentor1 @mentor2 @mentor3 …
-   /professor exclude add @organizer1 @organizer2 …
+   /professor mentor set @mentor1 @mentor2 …
+   /professor watch <signup_link> :fallout-cat:
 
-2. /professor watch <signup_message_link> :fallout-cat:
-   → you'll be DM'd every 5 min with new reactors + whether they're already in a group
+2. /professor plan 12 <signup_link> :fallout-cat:
+   — OR paste a hand-crafted plan.json on Nest
 
-3. /professor plan 12 <signup_message_link> :fallout-cat:
-   → splits reactors (minus excluded) into 12 random groups
-   → OR paste a hand-crafted plan.json directly on Nest for pre-balanced groups
+3. /professor plan show
 
-4. /professor plan show
-   → shows all groups with real display names
+4. /professor assign 1 @mentor1 @mentor2
+   … repeat for each group
 
-5. /professor assign 1 @mentor1 @mentor2
-   /professor assign 2 @mentor3 @mentor4
-   … repeat for each group (2 mentors preferred, 3 if needed)
+5. /professor launch gc
+   → creates channels, sets topics, creates canvases
 
-6. /professor launch gc
-   → creates #gc-group-1 … #gc-group-12
-   → invites admin first, then participants + mentors
-   → creates a canvas in each channel with group roster
+6. /professor channels addadmin
+   /professor channels settopic
+   /professor channels rename
+
+7. /professor audit
+   → check who reacted but isn't placed yet
 ```
 
 ---
@@ -113,78 +112,92 @@ Both are loaded identically. The bot normalizes the dict format to a list intern
 
 ### Admin
 
-Only the admin can run any command. `/professor admin show` is public so anyone can see who to contact.
+Only the admin can run any command. `admin show` is public.
 
 | Command | What it does |
 | --- | --- |
-| `/professor admin set @you` | Set the admin (first-time only, or current admin) |
-| `/professor admin show` | Show who the admin is |
+| `/professor admin set @you` | Set the admin |
+| `/professor admin show` | Show who the admin is (public) |
 | `/professor admin clear` | Remove the admin |
 
-To become channel manager in a group channel: open it → click your name → **Make channel manager**.
-
 ---
 
-### Reaction watcher
+### Group channel workflow
 
-Watch a signup message and get DM'd every 5 minutes with new reactors. Each DM tells you whether the reactor is already in a group channel or not — useful for monitoring late signups mid-program.
-
-New reactors are deduplicated: you're only notified once per person per watcher.
+#### Plan
 
 | Command | What it does |
 | --- | --- |
-| `/professor watch <link> <emoji>` | Start watching a message |
-| `/professor watch list` | Show active watchers (seen count, pending count) |
-| `/professor watch remove <link> <emoji>` | Stop watching one message |
-| `/professor watch clear` | Remove all watchers |
-
-**Example DM you'll receive:**
-
-```text
-New :fallout-cat: reactions on watched message:
-• @alice — ✗ not in any group yet
-• @bob — ✓ already in Group 3
-```
-
----
-
-### Plan
-
-Fetches emoji reactors, removes excluded users, splits into N random groups, and saves to `plan.json`.
-
-| Command | What it does |
-| --- | --- |
-| `/professor plan <N> <link> <emoji>` | Create N random groups from reactors |
-| `/professor plan show` | Show plan with real display names (fetches from Slack) |
+| `/professor plan <N> <link> <emoji>` | Split reactors (minus excluded) into N groups |
+| `/professor plan show` | Show plan — each user as `@mention (USERID)` |
 | `/professor plan clear` | Discard the current plan |
 
-**Loading a hand-crafted plan:** SSH into Nest, `nano plan.json`, paste your JSON in the dict format above, save. The bot loads it automatically on next command.
-
----
-
-### Assign mentors
-
-Manually assign mentors to each group. Re-running on the same group overwrites only that group — other groups are untouched.
+#### Assign mentors
 
 | Command | What it does |
 | --- | --- |
 | `/professor assign <group#> @mentor1 @mentor2` | Set mentors for a group (warns if >3) |
-| `/professor assign show` | Show full plan with current assignments |
+| `/professor assign show` | Show full plan with assignments |
 | `/professor assign clear` | Clear all mentor assignments |
 
----
-
-### Launch
-
-Creates a private Slack channel for every group that has mentors assigned. Admin is invited first (for channel manager promotion), then participants and mentors. A **canvas** is created in each channel with the group roster.
+#### Launch
 
 ```text
 /professor launch [prefix]
 ```
 
-Default prefix is `gc` → channels named `#gc-group-1`, `#gc-group-2`, etc.
+Creates a private channel per group, sets the channel topic to mentor names, creates a canvas with the group roster, and invites everyone. Default prefix is `gc`.
 
-All groups must have mentors assigned before launch will run.
+---
+
+### Reaction watcher
+
+Watches a signup message and DMs you every 24 hours with anyone who reacted but isn't in a group yet. Each DM also includes a live mentee count per channel so you can see which group to add them to.
+
+| Command | What it does |
+| --- | --- |
+| `/professor watch <link> <emoji>` | Start watching a message |
+| `/professor watch list` | Show active watchers |
+| `/professor watch run` | Manually trigger the 24h check right now |
+| `/professor watch remove <link> <emoji>` | Stop watching a message |
+| `/professor watch clear` | Remove all watchers |
+
+---
+
+### Audit
+
+Checks who reacted to the signup message but isn't in any group channel yet. Uses live Slack membership (not cached data), so manual additions are included.
+
+| Command | What it does |
+| --- | --- |
+| `/professor audit` | Audit the default signup message |
+| `/professor audit <link> <emoji>` | Audit a custom message |
+
+Also shows participant counts per channel (excluding mentors and admin).
+
+---
+
+### Announce
+
+Post a message to every bot-created channel at once.
+
+```text
+/professor announce <message>
+```
+
+---
+
+### Mentor list
+
+Adding a mentor automatically adds them to the exclude list so they don't appear as participants.
+
+| Command | What it does |
+| --- | --- |
+| `/professor mentor set @u1 @u2 …` | Replace entire mentor list |
+| `/professor mentor add @u …` | Add mentors |
+| `/professor mentor remove @u …` | Remove from mentor list |
+| `/professor mentor list` | Show stored mentors |
+| `/professor mentor clear` | Clear mentor list |
 
 ---
 
@@ -193,30 +206,15 @@ All groups must have mentors assigned before launch will run.
 | Command | What it does |
 | --- | --- |
 | `/professor channels list` | List all bot-created channels |
-| `/professor channels add @u <group#>` | Add someone to a group's channel |
-| `/professor channels kick @u <group#>` | Remove someone from a group's channel |
+| `/professor channels add @u <group#>` | Add someone to a channel — updates plan too |
+| `/professor channels kick @u <group#>` | Remove someone from a channel |
+| `/professor channels sync` | Pull live Slack members into plan (fixes people added manually) |
+| `/professor channels addadmin` | Add admin to all channels |
+| `/professor channels settopic` | Set mentor names as topic on all channels |
+| `/professor channels rename` | Rename channels to Hideout-一 … Hideout-十二 |
 | `/professor channels archive` | Archive all bot-created channels |
 
-**Adding a mentor after channels are created:**
-
-```text
-/professor assign 3 @newmentor        ← update the plan
-/professor channels add @newmentor 3  ← add to the channel
-```
-
----
-
-### Mentor list
-
-Adding a mentor automatically adds them to the exclude list so they don't appear as participants when running `/professor plan`.
-
-| Command | What it does |
-| --- | --- |
-| `/professor mentor set @u1 @u2 …` | Replace entire mentor list (also excludes all) |
-| `/professor mentor add @u …` | Add mentors (also excludes them) |
-| `/professor mentor remove @u …` | Remove from mentor list |
-| `/professor mentor list` | Show stored mentors |
-| `/professor mentor clear` | Clear mentor list |
+**Plan stays in sync automatically** — `member_joined_channel` and `member_left_channel` events update the plan whenever anyone joins or leaves a bot-created channel. Use `/professor channels sync` to catch anyone added before this was set up.
 
 ---
 
@@ -247,7 +245,7 @@ Read-only, no state saved.
 | --- | --- |
 | `/professor list <link> <emoji>` | List all reactors |
 | `/professor random <link> <emoji>` | List reactors in random order |
-| `/professor groups <N> <link> <emoji>` | Preview N groups without saving a plan |
+| `/professor groups <N> <link> <emoji>` | Preview N groups without saving |
 
 All support `--exclude @u …` at the end.
 
