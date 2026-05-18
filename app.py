@@ -747,6 +747,61 @@ def handle_channels_cmd(parts: list[str], client, respond):
         respond(text="\n".join(lines) or "Nothing updated.", response_type="ephemeral")
         return
 
+    if sub == "sync":
+        if not channels:
+            respond(text="No bot-created channels yet.", response_type="ephemeral")
+            return
+        plan = load_plan()
+        mentors_set = set(load_mentors())
+        admin = load_admin()
+        total_added = 0
+        errors = []
+        for c in channels:
+            try:
+                cursor = None
+                live_members = []
+                while True:
+                    kwargs = {"channel": c["channel_id"], "limit": 200}
+                    if cursor:
+                        kwargs["cursor"] = cursor
+                    resp = client.conversations_members(**kwargs)
+                    live_members.extend(resp.get("members", []))
+                    cursor = resp.get("response_metadata", {}).get("next_cursor")
+                    if not cursor:
+                        break
+
+                for uid in live_members:
+                    # Add to channels.json
+                    if uid not in c["participants"] and uid not in c.get("mentors", []):
+                        if uid in mentors_set or uid == admin:
+                            c.setdefault("mentors", []).append(uid)
+                        else:
+                            c["participants"].append(uid)
+                        total_added += 1
+
+                    # Add to plan.json
+                    if plan:
+                        for g in plan["groups"]:
+                            if g["id"] == c["group_id"]:
+                                if uid not in g["participants"] and uid not in g["mentors"]:
+                                    if uid in mentors_set or uid == admin:
+                                        g["mentors"].append(uid)
+                                    else:
+                                        g["participants"].append(uid)
+                                break
+            except Exception as e:
+                errors.append(f"Group {c['group_id']}: {e}")
+
+        save_channels(channels)
+        if plan:
+            save_plan(plan)
+
+        lines = [f"Synced live channel members → plan. {total_added} new member(s) added."]
+        if errors:
+            lines.append("Errors:\n" + "\n".join(errors))
+        respond(text="\n".join(lines), response_type="ephemeral")
+        return
+
     if sub == "rename":
         if not channels:
             respond(text="No bot-created channels yet.", response_type="ephemeral")
