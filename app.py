@@ -236,41 +236,45 @@ def build_canvas_md(group_id: int, participants: list[str], mentors: list[str]) 
 
 # ---------- reaction watcher background flush (24h) ----------
 
-def flush_watchers_job():
-    """Runs every 24 hours. Re-checks all reactors live and DMs admin about anyone not yet in a group."""
+def _do_watcher_flush():
+    """Core flush logic shared by scheduled and manual runs."""
     admin = load_admin()
-    if admin:
-        watchers = load_watchers()
-        excluded = load_exclude_list()
+    if not admin:
+        return
+    watchers = load_watchers()
+    excluded = load_exclude_list()
+    for w in watchers:
+        try:
+            resp = app.client.reactions_get(channel=w["channel"], timestamp=w["timestamp"], full=True)
+            all_reactors = []
+            for reaction in resp["message"].get("reactions", []):
+                if reaction["name"] == w["emoji"]:
+                    all_reactors = reaction["users"]
+                    break
+            unplaced = [u for u in all_reactors if u not in excluded and not get_user_group(u)]
+            if unplaced:
+                lines = [
+                    f"*24h reminder — :{w['emoji']}: reactors not yet in a group ({len(unplaced)}):*",
+                    f"_<{w['link']}|View message>_",
+                ]
+                for uid in unplaced:
+                    lines.append(f"• <@{uid}> ({uid})")
+                lines.append(f"\nUse `/professor channels add @user <group#>` to add them.")
+                app.client.chat_postMessage(channel=admin, text="\n".join(lines))
+            else:
+                app.client.chat_postMessage(
+                    channel=admin,
+                    text=f"✓ All :{w['emoji']}: reactors on <{w['link']}|watched message> are in a group.",
+                )
+        except Exception as e:
+            print(f"[watcher] flush error: {e}")
 
-        for w in watchers:
-            try:
-                resp = app.client.reactions_get(channel=w["channel"], timestamp=w["timestamp"], full=True)
-                all_reactors = []
-                for reaction in resp["message"].get("reactions", []):
-                    if reaction["name"] == w["emoji"]:
-                        all_reactors = reaction["users"]
-                        break
+def flush_watchers_job_once():
+    _do_watcher_flush()
 
-                unplaced = [u for u in all_reactors if u not in excluded and not get_user_group(u)]
-
-                if unplaced:
-                    lines = [
-                        f"*24h reminder — :{w['emoji']}: reactors not yet in a group ({len(unplaced)}):*",
-                        f"_<{w['link']}|View message>_",
-                    ]
-                    for uid in unplaced:
-                        lines.append(f"• <@{uid}> ({uid})")
-                    lines.append(f"\nUse `/professor channels add @user <group#>` to add them.")
-                    app.client.chat_postMessage(channel=admin, text="\n".join(lines))
-                else:
-                    app.client.chat_postMessage(
-                        channel=admin,
-                        text=f"✓ All :{w['emoji']}: reactors on <{w['link']}|watched message> are in a group.",
-                    )
-            except Exception as e:
-                print(f"[watcher] flush error: {e}")
-
+def flush_watchers_job():
+    """Runs every 24 hours."""
+    _do_watcher_flush()
     threading.Timer(86400, flush_watchers_job).start()
 
 
@@ -425,6 +429,11 @@ def handle_watch_cmd(parts: list[str], respond):
     if subparts[0].lower() == "clear":
         save_watchers([])
         respond(text="All watchers cleared.", response_type="ephemeral")
+        return
+
+    if subparts[0].lower() == "run":
+        respond(text="Running watcher check now...", response_type="ephemeral")
+        threading.Thread(target=flush_watchers_job_once, daemon=True).start()
         return
 
     if subparts[0].lower() == "remove":
