@@ -40,6 +40,8 @@ settings:
       - reaction_added
       - member_joined_channel
       - member_left_channel
+  interactivity:
+    is_enabled: true
   socket_mode_enabled: true
   token_rotation_enabled: false
 ```
@@ -152,7 +154,7 @@ Creates a private channel per group, sets the channel topic to mentor names, cre
 
 ### Reaction watcher
 
-Watches a signup message and DMs you every 24 hours with anyone who reacted but isn't in a group yet. Each DM also includes a live mentee count per channel so you can see which group to add them to.
+Watches a signup message and DMs you every 24 hours with anyone who reacted but isn't in a group yet. Each person appears with a dropdown showing all groups sorted by fewest mentees — select a group and they're instantly added to the channel and plan. No commands needed.
 
 | Command | What it does |
 | --- | --- |

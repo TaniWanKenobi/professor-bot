@@ -246,18 +246,8 @@ def build_canvas_md(group_id: int, participants: list[str], mentors: list[str]) 
 
 # ---------- reaction watcher background flush (24h) ----------
 
-def _do_watcher_flush():
-    """Core flush logic shared by scheduled and manual runs."""
-    admin = load_admin()
-    if not admin:
-        return
-    watchers = load_watchers()
-    excluded = load_exclude_list()
-    bot_channels = load_channels()
-    mentors_set = set(load_mentors())
-
-    # Build live participant counts per channel
-    channel_counts: dict[int, int] = {}
+def _get_channel_counts(bot_channels, mentors_set, admin) -> dict[int, int]:
+    counts = {}
     for c in bot_channels:
         try:
             cursor = None
@@ -271,16 +261,48 @@ def _do_watcher_flush():
                 cursor = resp.get("response_metadata", {}).get("next_cursor")
                 if not cursor:
                     break
-            channel_counts[c["group_id"]] = sum(
-                1 for u in members if u not in mentors_set and u != admin
-            )
+            counts[c["group_id"]] = sum(1 for u in members if u not in mentors_set and u != admin)
         except Exception:
-            channel_counts[c["group_id"]] = -1
+            counts[c["group_id"]] = -1
+    return counts
 
-    channel_summary = "\n".join(
-        f"  • <#{c['channel_id']}> Group {c['group_id']}: {channel_counts.get(c['group_id'], '?')} mentees"
-        for c in sorted(bot_channels, key=lambda x: x["group_id"])
-    )
+def _build_unplaced_blocks(unplaced: list[str], bot_channels: list, channel_counts: dict, link: str, emoji: str) -> list:
+    sorted_channels = sorted(bot_channels, key=lambda c: channel_counts.get(c["group_id"], 999))
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"Unplaced reactors ({len(unplaced)})", "emoji": True}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": f":{emoji}: reactions on <{link}|signup message> — select a group to add each person"}]},
+        {"type": "divider"},
+    ]
+    for uid in unplaced:
+        options = [
+            {
+                "text": {"type": "plain_text", "text": f"Group {c['group_id']} — {channel_counts.get(c['group_id'], '?')} mentees"},
+                "value": f"{uid}:{c['group_id']}",
+            }
+            for c in sorted_channels
+        ]
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"<@{uid}> `{uid}`"},
+            "accessory": {
+                "type": "static_select",
+                "placeholder": {"type": "plain_text", "text": "Add to group →"},
+                "options": options,
+                "action_id": "add_to_group",
+            },
+        })
+    return blocks
+
+def _do_watcher_flush():
+    """Core flush logic shared by scheduled and manual runs."""
+    admin = load_admin()
+    if not admin:
+        return
+    watchers = load_watchers()
+    excluded = load_exclude_list()
+    bot_channels = load_channels()
+    mentors_set = set(load_mentors())
+    channel_counts = _get_channel_counts(bot_channels, mentors_set, admin)
 
     for w in watchers:
         try:
@@ -292,25 +314,62 @@ def _do_watcher_flush():
                     break
             unplaced = [u for u in all_reactors if u not in excluded and not get_user_group(u)]
             if unplaced:
-                lines = [
-                    f"*24h reminder — :{w['emoji']}: reactors not yet in a group ({len(unplaced)}):*",
-                    f"_<{w['link']}|View message>_",
-                ]
-                for uid in unplaced:
-                    lines.append(f"• <@{uid}> ({uid})")
-                lines.append(f"\n*Current mentee counts per channel:*\n{channel_summary}")
-                lines.append(f"\nUse `/professor channels add @user <group#>` to add them.")
-                app.client.chat_postMessage(channel=admin, text="\n".join(lines))
+                blocks = _build_unplaced_blocks(unplaced, bot_channels, channel_counts, w["link"], w["emoji"])
+                app.client.chat_postMessage(channel=admin, text=f"Unplaced reactors ({len(unplaced)})", blocks=blocks)
             else:
+                summary = "\n".join(
+                    f"• <#{c['channel_id']}> Group {c['group_id']}: {channel_counts.get(c['group_id'], '?')} mentees"
+                    for c in sorted(bot_channels, key=lambda x: x["group_id"])
+                )
                 app.client.chat_postMessage(
                     channel=admin,
-                    text=f"✓ All :{w['emoji']}: reactors on <{w['link']}|watched message> are in a group.\n\n*Mentee counts:*\n{channel_summary}",
+                    text=f"✓ All reactors are placed.\n\n*Mentee counts:*\n{summary}",
                 )
         except Exception as e:
             print(f"[watcher] flush error: {e}")
 
 def flush_watchers_job_once():
     _do_watcher_flush()
+
+
+# ---------- action: add to group dropdown ----------
+
+@app.action("add_to_group")
+def handle_add_to_group(ack, action, client, body):
+    ack()
+    selected = action["selected_option"]["value"]
+    uid, gid_str = selected.rsplit(":", 1)
+    gid = int(gid_str)
+    dm_channel = body["channel"]["id"]
+
+    channels = load_channels()
+    ch = next((c for c in channels if c["group_id"] == gid), None)
+    if not ch:
+        client.chat_postMessage(channel=dm_channel, text=f"Error: no channel found for group {gid}.")
+        return
+
+    try:
+        client.conversations_invite(channel=ch["channel_id"], users=uid)
+
+        if uid not in ch["participants"] and uid not in ch.get("mentors", []):
+            ch["participants"].append(uid)
+            save_channels(channels)
+
+        plan = load_plan()
+        if plan:
+            for g in plan["groups"]:
+                if g["id"] == gid:
+                    if uid not in g["participants"] and uid not in g["mentors"]:
+                        g["participants"].append(uid)
+                    break
+            save_plan(plan)
+
+        client.chat_postMessage(
+            channel=dm_channel,
+            text=f"✓ Added <@{uid}> to <#{ch['channel_id']}> (Group {gid}) and updated the plan.",
+        )
+    except Exception as e:
+        client.chat_postMessage(channel=dm_channel, text=f"Error: {e}")
 
 def flush_watchers_job():
     """Runs every 24 hours."""
