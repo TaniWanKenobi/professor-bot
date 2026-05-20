@@ -64,7 +64,9 @@ USAGE = (
     "• `/professor channels rename` — rename channels to Hideout-一 … Hideout-十二\n"
     "• `/professor channels archive` — archive all bot-created channels\n\n"
     "*Announce:*\n"
-    "• `/professor announce <message>` — post a message to all bot-created channels\n\n"
+    "• `/professor announce <message>` — post a message to all channels\n"
+    "• `/professor here <message>` — @here ping in the channel you run it from\n"
+    "• `/professor channel <message>` — @channel ping in the channel you run it from\n\n"
     "*Manual participants (website signups, treated same as Slack reactors):*\n"
     "• `/professor manual list` — show manually added participants\n"
     "• `/professor manual add @u …` — add someone manually\n"
@@ -1323,6 +1325,51 @@ def handle_audit_cmd(parts: list[str], client, respond):
     respond(text="\n".join(lines), response_type="ephemeral")
 
 
+def handle_announce_cmd(parts: list[str], client, respond, ping: str | None = None, channel_id: str | None = None):
+    message = " ".join(parts[1:]).strip()
+    if not message:
+        cmd = f"/professor {ping or 'announce'}"
+        respond(text=f"Usage: `{cmd} <message>`", response_type="ephemeral")
+        return
+
+    if ping == "here":
+        full_message = f"<!here> {message}"
+    elif ping == "channel":
+        full_message = f"<!channel> {message}"
+    else:
+        full_message = message
+
+    if ping in ("here", "channel"):
+        # Send only to the channel where the command was run
+        if not channel_id:
+            respond(text="Could not determine the current channel.", response_type="ephemeral")
+            return
+        try:
+            client.chat_postMessage(channel=channel_id, text=full_message)
+            respond(text=f"Sent to <#{channel_id}>.", response_type="ephemeral")
+        except Exception as e:
+            respond(text=f"Error: {e}", response_type="ephemeral")
+    else:
+        # announce goes to all channels
+        channels = load_channels()
+        if not channels:
+            respond(text="No bot-created channels yet. Run `/professor launch` first.", response_type="ephemeral")
+            return
+        sent, errors = [], []
+        for c in channels:
+            try:
+                client.chat_postMessage(channel=c["channel_id"], text=full_message)
+                sent.append(f"<#{c['channel_id']}>")
+            except Exception as e:
+                errors.append(f"<#{c['channel_id']}>: {e}")
+        lines = []
+        if sent:
+            lines.append(f"Sent to {len(sent)} channel(s): " + "  ".join(sent))
+        if errors:
+            lines.append("Failed:\n" + "\n".join(errors))
+        respond(text="\n".join(lines), response_type="ephemeral")
+
+
 # ---------- main dispatch ----------
 
 @app.command("/professor")
@@ -1363,8 +1410,8 @@ def handle_professor(ack, command, client, respond):
             handle_channels_cmd(parts, client, respond)
         elif mode == "audit":
             handle_audit_cmd(parts, client, respond)
-        elif mode == "announce":
-            handle_announce_cmd(parts, client, respond)
+        elif mode in ("announce", "here", "channel"):
+            handle_announce_cmd(parts, client, respond, ping=mode if mode in ("here", "channel") else None, channel_id=command.get("channel_id"))
         elif mode == "manual":
             handle_manual_cmd(parts, respond)
         elif mode == "exclude":
