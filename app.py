@@ -1327,15 +1327,14 @@ def handle_audit_cmd(parts: list[str], client, respond):
 
 def handle_announce_cmd(parts: list[str], client, respond, ping: str | None = None, channel_id: str | None = None):
     message = " ".join(parts[1:]).strip()
-    if not message:
-        cmd = f"/professor {ping or 'announce'}"
-        respond(text=f"Usage: `{cmd} <message>`", response_type="ephemeral")
+    if not message and ping not in ("here", "channel"):
+        respond(text=f"Usage: `/professor announce <message>`", response_type="ephemeral")
         return
 
     if ping == "here":
-        full_message = f"<!here> {message}"
+        full_message = f"<!here> {message}".strip()
     elif ping == "channel":
-        full_message = f"<!channel> {message}"
+        full_message = f"<!channel> {message}".strip()
     else:
         full_message = message
 
@@ -1345,7 +1344,12 @@ def handle_announce_cmd(parts: list[str], client, respond, ping: str | None = No
             respond(text="Could not determine the current channel.", response_type="ephemeral")
             return
         try:
-            client.chat_postMessage(channel=channel_id, text=full_message)
+            client.chat_postMessage(
+                channel=channel_id,
+                text=full_message,
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": full_message}}],
+                link_names=True,
+            )
             respond(text=f"Sent to <#{channel_id}>.", response_type="ephemeral")
         except Exception as e:
             respond(text=f"Error: {e}", response_type="ephemeral")
