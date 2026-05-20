@@ -4,6 +4,7 @@ import json
 import random
 import threading
 from datetime import datetime, timezone
+from flask import Flask, request, jsonify
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from dotenv import load_dotenv
@@ -18,6 +19,7 @@ PLAN_FILE = "plan.json"
 CHANNELS_FILE = "channels.json"
 ADMIN_FILE = "admin.json"
 WATCHERS_FILE = "watchers.json"
+MANUAL_FILE = "manual_participants.json"
 
 USAGE = (
     "*`/professor` — mentorship group channel manager*\n\n"
@@ -63,6 +65,11 @@ USAGE = (
     "• `/professor channels archive` — archive all bot-created channels\n\n"
     "*Announce:*\n"
     "• `/professor announce <message>` — post a message to all bot-created channels\n\n"
+    "*Manual participants (website signups, treated same as Slack reactors):*\n"
+    "• `/professor manual list` — show manually added participants\n"
+    "• `/professor manual add @u …` — add someone manually\n"
+    "• `/professor manual remove @u …` — remove\n"
+    "• `/professor manual clear` — clear manual list\n\n"
     "*Exclude list:*\n"
     "• `/professor exclude` — show excluded users\n"
     "• `/professor exclude add @u …` — add (also works inline with `--exclude`)\n"
@@ -128,6 +135,48 @@ def save_admin(uid: str | None): _save(ADMIN_FILE, uid)
 
 def load_watchers(): return _load(WATCHERS_FILE, [])
 def save_watchers(w): _save(WATCHERS_FILE, w)
+
+def load_manual_participants(): return _load(MANUAL_FILE, [])
+def save_manual_participants(u): _save(MANUAL_FILE, list(dict.fromkeys(u)))
+
+
+# ---------- Flask HTTP API ----------
+
+flask_app = Flask(__name__)
+
+@flask_app.route("/manual-add", methods=["POST"])
+def api_manual_add():
+    data = request.get_json(silent=True) or {}
+    secret = os.environ.get("PROFESSOR_API_SECRET", "")
+    if not secret or data.get("secret") != secret:
+        return jsonify({"error": "unauthorized"}), 401
+    user_id = data.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    manual = load_manual_participants()
+    if user_id not in manual:
+        manual.append(user_id)
+        save_manual_participants(manual)
+    return jsonify({"ok": True, "user_id": user_id})
+
+@flask_app.route("/manual-remove", methods=["POST"])
+def api_manual_remove():
+    data = request.get_json(silent=True) or {}
+    secret = os.environ.get("PROFESSOR_API_SECRET", "")
+    if not secret or data.get("secret") != secret:
+        return jsonify({"error": "unauthorized"}), 401
+    user_id = data.get("user_id", "").strip()
+    manual = [u for u in load_manual_participants() if u != user_id]
+    save_manual_participants(manual)
+    return jsonify({"ok": True})
+
+@flask_app.route("/health", methods=["GET"])
+def api_health():
+    return jsonify({"ok": True})
+
+def start_flask():
+    port = int(os.environ.get("PROFESSOR_API_PORT", "5001"))
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
 # ---------- name resolution ----------
@@ -312,7 +361,9 @@ def _do_watcher_flush():
                 if reaction["name"] == w["emoji"]:
                     all_reactors = reaction["users"]
                     break
-            unplaced = [u for u in all_reactors if u not in excluded and not get_user_group(u)]
+            # Merge manual participants (website signups) with Slack reactors
+            all_participants = list(dict.fromkeys(all_reactors + load_manual_participants()))
+            unplaced = [u for u in all_participants if u not in excluded and not get_user_group(u)]
             if unplaced:
                 blocks = _build_unplaced_blocks(unplaced, bot_channels, channel_counts, w["link"], w["emoji"])
                 app.client.chat_postMessage(channel=admin, text=f"Unplaced reactors ({len(unplaced)})", blocks=blocks)
@@ -1060,6 +1111,45 @@ def handle_channels_cmd(parts: list[str], client, respond):
         respond(text=f"Unknown channels subcommand `{sub}`.\n\n{USAGE}", response_type="ephemeral")
 
 
+def handle_manual_cmd(parts: list[str], respond):
+    manual = load_manual_participants()
+    subparts = parts[1:]
+
+    if not subparts or subparts[0].lower() == "list":
+        if not manual:
+            respond(text="No manual participants. Add via `/professor manual add @u` or the website button.", response_type="ephemeral")
+        else:
+            respond(text=f"*Manual participants ({len(manual)}) — treated as if they reacted:*\n" + "\n".join(f"• {fmt_user(u)}" for u in manual), response_type="ephemeral")
+        return
+
+    sub = subparts[0].lower()
+
+    if sub == "add":
+        new = parse_mentions(subparts[1:])
+        if not new:
+            respond(text="Mention at least one user: `/professor manual add @user`", response_type="ephemeral")
+            return
+        updated = list(dict.fromkeys(manual + new))
+        save_manual_participants(updated)
+        respond(text=f"Added {len(new)} to manual list. Total: {len(updated)}.", response_type="ephemeral")
+
+    elif sub == "remove":
+        rem = parse_mentions(subparts[1:])
+        if not rem:
+            respond(text="Mention at least one user: `/professor manual remove @user`", response_type="ephemeral")
+            return
+        updated = [u for u in manual if u not in rem]
+        save_manual_participants(updated)
+        respond(text=f"Removed {len(rem)}. Remaining: {len(updated)}.", response_type="ephemeral")
+
+    elif sub == "clear":
+        save_manual_participants([])
+        respond(text="Manual participant list cleared.", response_type="ephemeral")
+
+    else:
+        respond(text=f"Unknown manual subcommand `{sub}`.\n\n{USAGE}", response_type="ephemeral")
+
+
 def handle_exclude_cmd(parts: list[str], respond):
     excluded = load_exclude_list()
     subparts = parts[1:]
@@ -1174,7 +1264,9 @@ def handle_audit_cmd(parts: list[str], client, respond):
         return
 
     excluded = load_exclude_list()
-    reactors = [u for u in get_reactors(client, channel, timestamp, emoji) if u not in excluded]
+    slack_reactors = get_reactors(client, channel, timestamp, emoji)
+    all_participants = list(dict.fromkeys(slack_reactors + load_manual_participants()))
+    reactors = [u for u in all_participants if u not in excluded]
 
     if not reactors:
         respond(text=f"No :{emoji}: reactors found (or all are excluded).", response_type="ephemeral")
@@ -1273,6 +1365,8 @@ def handle_professor(ack, command, client, respond):
             handle_audit_cmd(parts, client, respond)
         elif mode == "announce":
             handle_announce_cmd(parts, client, respond)
+        elif mode == "manual":
+            handle_manual_cmd(parts, respond)
         elif mode == "exclude":
             handle_exclude_cmd(parts, respond)
         elif mode in ("list", "random", "groups"):
@@ -1284,5 +1378,6 @@ def handle_professor(ack, command, client, respond):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=start_flask, daemon=True).start()
     threading.Timer(86400, flush_watchers_job).start()
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
