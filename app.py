@@ -1394,8 +1394,20 @@ def handle_professor(ack, command, client, respond):
     # /professor admin show is always public
     if not (mode == "admin" and (not parts[1:] or parts[1].lower() == "show")):
         if admin and caller_id != admin:
-            respond(text=f"Only the admin (<@{admin}>) can use this bot.", response_type="ephemeral")
-            return
+            # Mentors may use here/channel only in their own assigned group channel
+            if mode in ("here", "channel"):
+                invoke_channel_id = command.get("channel_id")
+                channels = load_channels()
+                mentor_channel = next(
+                    (c for c in channels if c["channel_id"] == invoke_channel_id and caller_id in c.get("mentors", [])),
+                    None,
+                )
+                if not mentor_channel:
+                    respond(text="You can only use `/professor here` and `/professor channel` in your own group channel.", response_type="ephemeral")
+                    return
+            else:
+                respond(text=f"Only the admin (<@{admin}>) can use this bot.", response_type="ephemeral")
+                return
 
     try:
         if mode == "admin":
