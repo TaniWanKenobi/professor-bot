@@ -20,6 +20,7 @@ CHANNELS_FILE = "channels.json"
 ADMIN_FILE = "admin.json"
 WATCHERS_FILE = "watchers.json"
 MANUAL_FILE = "manual_participants.json"
+SLICE_FILE = "slice.json"
 
 USAGE = (
     "*`/professor` — mentorship group channel manager*\n\n"
@@ -54,6 +55,10 @@ USAGE = (
     "• `/professor mentor remove @u …` — remove mentors\n"
     "• `/professor mentor set @u1 @u2 …` — replace entire list\n"
     "• `/professor mentor clear` — clear list\n\n"
+    "*Group activity slice (remove inactive members):*\n"
+    "• `/professor mentor slice <message>` — post a ✅ react prompt to all group channels (message required)\n"
+    "• `/professor mentor slice --test <message>` — test in current channel only, doesn't save to slice.json\n"
+    "• `/professor mentor finish` — DM you non-reactors per group with Remove buttons\n\n"
     "*Channel management:*\n"
     "• `/professor channels list` — list bot-created channels\n"
     "• `/professor channels add @u <group#>` — add someone to a group's channel & plan\n"
@@ -140,6 +145,9 @@ def save_watchers(w): _save(WATCHERS_FILE, w)
 
 def load_manual_participants(): return _load(MANUAL_FILE, [])
 def save_manual_participants(u): _save(MANUAL_FILE, list(dict.fromkeys(u)))
+
+def load_slice(): return _load(SLICE_FILE, [])
+def save_slice(s): _save(SLICE_FILE, s)
 
 
 # ---------- Flask HTTP API ----------
@@ -634,7 +642,7 @@ def handle_watch_cmd(parts: list[str], respond):
     )
 
 
-def handle_mentor_cmd(parts: list[str], respond):
+def handle_mentor_cmd(parts: list[str], respond, client=None, command_channel_id: str | None = None):
     mentors = load_mentors()
     subparts = parts[1:]
 
@@ -646,6 +654,20 @@ def handle_mentor_cmd(parts: list[str], respond):
         return
 
     sub = subparts[0].lower()
+
+    if sub == "slice":
+        if client is None:
+            respond(text="Error: client not available.", response_type="ephemeral")
+            return
+        handle_mentor_slice(subparts[1:], client, respond, command_channel_id=command_channel_id)
+        return
+
+    if sub == "finish":
+        if client is None:
+            respond(text="Error: client not available.", response_type="ephemeral")
+            return
+        handle_mentor_finish(client, respond)
+        return
 
     if sub == "add":
         new = parse_mentions(subparts[1:])
@@ -1113,6 +1135,191 @@ def handle_channels_cmd(parts: list[str], client, respond):
         respond(text=f"Unknown channels subcommand `{sub}`.\n\n{USAGE}", response_type="ephemeral")
 
 
+def handle_mentor_slice(subparts: list[str], client, respond, command_channel_id: str | None = None):
+    channels = load_channels()
+    if not channels:
+        respond(text="No channels yet. Run `/professor launch` first.", response_type="ephemeral")
+        return
+
+    test_mode = "--test" in subparts
+    subparts = [p for p in subparts if p != "--test"]
+
+    emoji = "white_check_mark"
+    msg_parts = subparts
+    if subparts and subparts[0].startswith(":") and subparts[0].endswith(":"):
+        emoji = subparts[0].strip(":")
+        msg_parts = subparts[1:]
+
+    custom = " ".join(msg_parts).strip()
+    if not custom:
+        respond(text="Usage: `/professor mentor slice [--test] [:emoji:] <message>`\nA message is required.", response_type="ephemeral")
+        return
+
+    message = custom + f"\n\nReact with :{emoji}: to stay in your group!"
+
+    if test_mode:
+        if not command_channel_id:
+            respond(text="Could not determine current channel for test mode.", response_type="ephemeral")
+            return
+        target_channels = [c for c in channels if c["channel_id"] == command_channel_id]
+        if not target_channels:
+            respond(text="This channel isn't a bot-managed group channel. Run this from inside a hideout channel to test.", response_type="ephemeral")
+            return
+    else:
+        target_channels = channels
+
+    slice_records, sent, errors = [], [], []
+    for c in target_channels:
+        try:
+            resp = client.chat_postMessage(channel=c["channel_id"], text=message)
+            slice_records.append({
+                "group_id": c["group_id"],
+                "channel_id": c["channel_id"],
+                "message_ts": resp["ts"],
+                "emoji": emoji,
+            })
+            sent.append(f"<#{c['channel_id']}>")
+        except Exception as e:
+            errors.append(f"Group {c['group_id']}: {e}")
+
+    if not test_mode:
+        save_slice(slice_records)
+
+    lines = []
+    prefix = "🧪 *Test mode* — slice.json not saved. " if test_mode else ""
+    if sent:
+        lines.append(f"{prefix}Sent to {len(sent)} channel(s)." + ("" if test_mode else " Run `/professor mentor finish` when ready to review who didn't react."))
+    if errors:
+        lines.append("Errors:\n" + "\n".join(errors))
+    respond(text="\n".join(lines), response_type="ephemeral")
+
+
+def handle_mentor_finish(client, respond):
+    admin = load_admin()
+    if not admin:
+        respond(text="No admin set.", response_type="ephemeral")
+        return
+
+    slice_records = load_slice()
+    if not slice_records:
+        respond(text="No active slice. Run `/professor mentor slice <message>` first.", response_type="ephemeral")
+        return
+
+    mentors_set = set(load_mentors())
+    channels = load_channels()
+    total = 0
+    all_blocks = []
+
+    for record in slice_records:
+        cid = record["channel_id"]
+        gid = record["group_id"]
+        emoji = record["emoji"]
+        ts = record["message_ts"]
+
+        try:
+            resp = client.reactions_get(channel=cid, timestamp=ts, full=True)
+            reactors = set()
+            for r in resp["message"].get("reactions", []):
+                if r["name"] == emoji:
+                    reactors = set(r["users"])
+                    break
+        except Exception:
+            reactors = set()
+
+        try:
+            cursor, members = None, []
+            while True:
+                kwargs = {"channel": cid, "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = client.conversations_members(**kwargs)
+                members.extend(resp.get("members", []))
+                cursor = resp.get("response_metadata", {}).get("next_cursor")
+                if not cursor:
+                    break
+        except Exception:
+            members = []
+
+        non_reactors = [u for u in members if u not in reactors and u not in mentors_set and u != admin]
+        if not non_reactors:
+            continue
+
+        total += len(non_reactors)
+        all_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Group {gid}* — <#{cid}> — {len(non_reactors)} didn't react"}})
+
+        for uid in non_reactors:
+            all_blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"<@{uid}>"},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Remove"},
+                    "style": "danger",
+                    "value": f"{uid}:{cid}:{gid}",
+                    "action_id": "slice_remove",
+                    "confirm": {
+                        "title": {"type": "plain_text", "text": "Remove member?"},
+                        "text": {"type": "mrkdwn", "text": f"Remove <@{uid}> from <#{cid}>?"},
+                        "confirm": {"type": "plain_text", "text": "Yes, remove"},
+                        "deny": {"type": "plain_text", "text": "Keep"},
+                    },
+                },
+            })
+
+        all_blocks.append({"type": "divider"})
+
+    if total == 0:
+        respond(text="Everyone reacted — no one to remove :tada:", response_type="ephemeral")
+        return
+
+    header = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"Members who didn't react ({total})", "emoji": True}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "Click *Remove* to kick from their channel and update the plan. Mentors are never listed."}]},
+        {"type": "divider"},
+    ]
+
+    # Slack allows max 50 blocks per message — chunk if needed
+    chunk_size = 47
+    chunks = [all_blocks[i:i+chunk_size] for i in range(0, len(all_blocks), chunk_size)]
+    for i, chunk in enumerate(chunks):
+        blocks = (header if i == 0 else []) + chunk
+        client.chat_postMessage(channel=admin, text=f"Members who didn't react ({total})", blocks=blocks)
+
+    respond(text=f"DM sent — {total} non-reactor(s) to review.", response_type="ephemeral")
+
+
+@app.action("slice_remove")
+def handle_slice_remove(ack, action, client, body):
+    ack()
+    uid, channel_id, gid_str = action["value"].split(":")
+    gid = int(gid_str)
+    dm_channel = body["channel"]["id"]
+
+    try:
+        client.conversations_kick(channel=channel_id, user=uid)
+
+        channels = load_channels()
+        for c in channels:
+            if c["channel_id"] == channel_id:
+                if uid in c.get("participants", []):
+                    c["participants"].remove(uid)
+                break
+        save_channels(channels)
+
+        plan = load_plan()
+        if plan:
+            for g in plan["groups"]:
+                if g["id"] == gid:
+                    if uid in g.get("participants", []):
+                        g["participants"].remove(uid)
+                    break
+            save_plan(plan)
+
+        client.chat_postMessage(channel=dm_channel, text=f"✓ Removed <@{uid}> from <#{channel_id}>.")
+    except Exception as e:
+        client.chat_postMessage(channel=dm_channel, text=f"Error removing <@{uid}>: {e}")
+
+
 def handle_manual_cmd(parts: list[str], respond):
     manual = load_manual_participants()
     subparts = parts[1:]
@@ -1436,7 +1643,7 @@ def handle_professor(ack, command, client, respond):
         elif mode == "watch":
             handle_watch_cmd(parts, respond)
         elif mode == "mentor":
-            handle_mentor_cmd(parts, respond)
+            handle_mentor_cmd(parts, respond, client=client, command_channel_id=command.get("channel_id"))
         elif mode == "plan":
             handle_plan_cmd(parts, client, respond)
         elif mode == "assign":
