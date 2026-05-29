@@ -33,6 +33,7 @@ oauth_config:
       - im:write
       - users:read
       - canvases:write
+      - chat:write.customize
 
 settings:
   event_subscriptions:

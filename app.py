@@ -1325,7 +1325,18 @@ def handle_audit_cmd(parts: list[str], client, respond):
     respond(text="\n".join(lines), response_type="ephemeral")
 
 
-def handle_announce_cmd(parts: list[str], client, respond, ping: str | None = None, channel_id: str | None = None):
+def _get_user_identity(client, user_id: str) -> tuple[str, str | None]:
+    """Returns (display_name, avatar_url) for a user."""
+    try:
+        resp = client.users_info(user=user_id)
+        profile = resp["user"]["profile"]
+        name = profile.get("display_name") or profile.get("real_name") or "Professor"
+        avatar = profile.get("image_192") or profile.get("image_72")
+        return name, avatar
+    except Exception:
+        return "Professor", None
+
+def handle_announce_cmd(parts: list[str], client, respond, ping: str | None = None, channel_id: str | None = None, caller_id: str | None = None):
     message = " ".join(parts[1:]).strip()
     if not message and ping not in ("here", "channel"):
         respond(text=f"Usage: `/professor announce <message>`", response_type="ephemeral")
@@ -1338,18 +1349,28 @@ def handle_announce_cmd(parts: list[str], client, respond, ping: str | None = No
     else:
         full_message = message
 
+    # For here/channel pings, impersonate the caller's name and avatar
+    caller_name, caller_avatar = None, None
+    if ping in ("here", "channel") and caller_id:
+        caller_name, caller_avatar = _get_user_identity(client, caller_id)
+
     if ping in ("here", "channel"):
         # Send only to the channel where the command was run
         if not channel_id:
             respond(text="Could not determine the current channel.", response_type="ephemeral")
             return
         try:
-            client.chat_postMessage(
+            kwargs = dict(
                 channel=channel_id,
                 text=full_message,
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": full_message}}],
                 link_names=True,
             )
+            if caller_name:
+                kwargs["username"] = caller_name
+            if caller_avatar:
+                kwargs["icon_url"] = caller_avatar
+            client.chat_postMessage(**kwargs)
             respond(text=f"Sent to <#{channel_id}>.", response_type="ephemeral")
         except Exception as e:
             respond(text=f"Error: {e}", response_type="ephemeral")
@@ -1427,7 +1448,7 @@ def handle_professor(ack, command, client, respond):
         elif mode == "audit":
             handle_audit_cmd(parts, client, respond)
         elif mode in ("announce", "here", "channel"):
-            handle_announce_cmd(parts, client, respond, ping=mode if mode in ("here", "channel") else None, channel_id=command.get("channel_id"))
+            handle_announce_cmd(parts, client, respond, ping=mode if mode in ("here", "channel") else None, channel_id=command.get("channel_id"), caller_id=caller_id)
         elif mode == "manual":
             handle_manual_cmd(parts, respond)
         elif mode == "exclude":
