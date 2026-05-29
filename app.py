@@ -1158,7 +1158,7 @@ def handle_mentor_slice(subparts: list[str], client, respond, command_channel_id
         respond(text="Usage: `/professor mentor slice [--test] [:emoji:] <message>`\nA message is required.", response_type="ephemeral")
         return
 
-    message = custom + f"\n\nReact with :{emoji}: to stay in your group!"
+    message = f"<!channel>\n{custom}"
 
     caller_name, caller_avatar = None, None
     if caller_id:
