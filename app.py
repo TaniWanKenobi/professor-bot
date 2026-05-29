@@ -73,7 +73,8 @@ USAGE = (
     "• `/professor here [message]` — @here ping in the channel you run it from\n"
     "• `/professor channel [message]` — @channel ping in the channel you run it from\n\n"
     "*Delete:*\n"
-    "• `/professor delete <message_link>` — delete a specific bot message\n\n"
+    "• `/professor delete <message_link>` — delete a specific bot message\n"
+    "• `/professor delete slice` — delete all slice messages from all channels\n\n"
     "*Manual participants (website signups, treated same as Slack reactors):*\n"
     "• `/professor manual list` — show manually added participants\n"
     "• `/professor manual add @u …` — add someone manually\n"
@@ -1178,7 +1179,11 @@ def handle_mentor_slice(subparts: list[str], client, respond, command_channel_id
     slice_records, sent, errors = [], [], []
     for c in target_channels:
         try:
-            kwargs = {"channel": c["channel_id"], "text": message}
+            kwargs = {
+                "channel": c["channel_id"],
+                "text": message,
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": message}}],
+            }
             if caller_name:
                 kwargs["username"] = caller_name
             if caller_avatar:
@@ -1557,8 +1562,30 @@ def _get_user_identity(client, user_id: str) -> tuple[str, str | None]:
 
 def handle_delete_cmd(parts: list[str], client, respond):
     if len(parts) < 2:
-        respond(text="Usage: `/professor delete <message_link>`", response_type="ephemeral")
+        respond(text="Usage: `/professor delete <message_link>` or `/professor delete slice`", response_type="ephemeral")
         return
+
+    if parts[1].lower() == "slice":
+        slice_records = load_slice()
+        if not slice_records:
+            respond(text="No slice messages to delete.", response_type="ephemeral")
+            return
+        deleted, errors = [], []
+        for r in slice_records:
+            try:
+                client.chat_delete(channel=r["channel_id"], ts=r["message_ts"])
+                deleted.append(f"<#{r['channel_id']}>")
+            except Exception as e:
+                errors.append(f"<#{r['channel_id']}>: {e}")
+        save_slice([])
+        lines = []
+        if deleted:
+            lines.append(f"Deleted {len(deleted)} slice message(s): " + "  ".join(deleted))
+        if errors:
+            lines.append("Errors:\n" + "\n".join(errors))
+        respond(text="\n".join(lines), response_type="ephemeral")
+        return
+
     channel, timestamp = parse_message_link(parts[1])
     if not channel or not timestamp:
         respond(text="Could not parse the message link. Copy it via *Copy link* in Slack.", response_type="ephemeral")
