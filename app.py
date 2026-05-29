@@ -70,8 +70,10 @@ USAGE = (
     "• `/professor channels archive` — archive all bot-created channels\n\n"
     "*Announce:*\n"
     "• `/professor announce <message>` — post a message to all channels\n"
-    "• `/professor here <message>` — @here ping in the channel you run it from\n"
-    "• `/professor channel <message>` — @channel ping in the channel you run it from\n\n"
+    "• `/professor here [message]` — @here ping in the channel you run it from\n"
+    "• `/professor channel [message]` — @channel ping in the channel you run it from\n\n"
+    "*Delete:*\n"
+    "• `/professor delete <message_link>` — delete a specific bot message\n\n"
     "*Manual participants (website signups, treated same as Slack reactors):*\n"
     "• `/professor manual list` — show manually added participants\n"
     "• `/professor manual add @u …` — add someone manually\n"
@@ -148,6 +150,7 @@ def save_manual_participants(u): _save(MANUAL_FILE, list(dict.fromkeys(u)))
 
 def load_slice(): return _load(SLICE_FILE, [])
 def save_slice(s): _save(SLICE_FILE, s)
+
 
 
 # ---------- Flask HTTP API ----------
@@ -642,7 +645,7 @@ def handle_watch_cmd(parts: list[str], respond):
     )
 
 
-def handle_mentor_cmd(parts: list[str], respond, client=None, command_channel_id: str | None = None):
+def handle_mentor_cmd(parts: list[str], respond, client=None, command_channel_id: str | None = None, caller_id: str | None = None):
     mentors = load_mentors()
     subparts = parts[1:]
 
@@ -659,7 +662,7 @@ def handle_mentor_cmd(parts: list[str], respond, client=None, command_channel_id
         if client is None:
             respond(text="Error: client not available.", response_type="ephemeral")
             return
-        handle_mentor_slice(subparts[1:], client, respond, command_channel_id=command_channel_id)
+        handle_mentor_slice(subparts[1:], client, respond, command_channel_id=command_channel_id, caller_id=caller_id)
         return
 
     if sub == "finish":
@@ -1135,7 +1138,7 @@ def handle_channels_cmd(parts: list[str], client, respond):
         respond(text=f"Unknown channels subcommand `{sub}`.\n\n{USAGE}", response_type="ephemeral")
 
 
-def handle_mentor_slice(subparts: list[str], client, respond, command_channel_id: str | None = None):
+def handle_mentor_slice(subparts: list[str], client, respond, command_channel_id: str | None = None, caller_id: str | None = None):
     channels = load_channels()
     if not channels:
         respond(text="No channels yet. Run `/professor launch` first.", response_type="ephemeral")
@@ -1157,6 +1160,10 @@ def handle_mentor_slice(subparts: list[str], client, respond, command_channel_id
 
     message = custom + f"\n\nReact with :{emoji}: to stay in your group!"
 
+    caller_name, caller_avatar = None, None
+    if caller_id:
+        caller_name, caller_avatar = _get_user_identity(client, caller_id)
+
     if test_mode:
         if not command_channel_id:
             respond(text="Could not determine current channel for test mode.", response_type="ephemeral")
@@ -1171,7 +1178,12 @@ def handle_mentor_slice(subparts: list[str], client, respond, command_channel_id
     slice_records, sent, errors = [], [], []
     for c in target_channels:
         try:
-            resp = client.chat_postMessage(channel=c["channel_id"], text=message)
+            kwargs = {"channel": c["channel_id"], "text": message}
+            if caller_name:
+                kwargs["username"] = caller_name
+            if caller_avatar:
+                kwargs["icon_url"] = caller_avatar
+            resp = client.chat_postMessage(**kwargs)
             slice_records.append({
                 "group_id": c["group_id"],
                 "channel_id": c["channel_id"],
@@ -1543,6 +1555,21 @@ def _get_user_identity(client, user_id: str) -> tuple[str, str | None]:
     except Exception:
         return "Professor", None
 
+def handle_delete_cmd(parts: list[str], client, respond):
+    if len(parts) < 2:
+        respond(text="Usage: `/professor delete <message_link>`", response_type="ephemeral")
+        return
+    channel, timestamp = parse_message_link(parts[1])
+    if not channel or not timestamp:
+        respond(text="Could not parse the message link. Copy it via *Copy link* in Slack.", response_type="ephemeral")
+        return
+    try:
+        client.chat_delete(channel=channel, ts=timestamp)
+        respond(text="Message deleted.", response_type="ephemeral")
+    except Exception as e:
+        respond(text=f"Error: {e}", response_type="ephemeral")
+
+
 def handle_announce_cmd(parts: list[str], client, respond, ping: str | None = None, channel_id: str | None = None, caller_id: str | None = None):
     message = " ".join(parts[1:]).strip()
     if not message and ping not in ("here", "channel"):
@@ -1643,7 +1670,7 @@ def handle_professor(ack, command, client, respond):
         elif mode == "watch":
             handle_watch_cmd(parts, respond)
         elif mode == "mentor":
-            handle_mentor_cmd(parts, respond, client=client, command_channel_id=command.get("channel_id"))
+            handle_mentor_cmd(parts, respond, client=client, command_channel_id=command.get("channel_id"), caller_id=caller_id)
         elif mode == "plan":
             handle_plan_cmd(parts, client, respond)
         elif mode == "assign":
@@ -1654,6 +1681,8 @@ def handle_professor(ack, command, client, respond):
             handle_channels_cmd(parts, client, respond)
         elif mode == "audit":
             handle_audit_cmd(parts, client, respond)
+        elif mode == "delete":
+            handle_delete_cmd(parts, client, respond)
         elif mode in ("announce", "here", "channel"):
             handle_announce_cmd(parts, client, respond, ping=mode if mode in ("here", "channel") else None, channel_id=command.get("channel_id"), caller_id=caller_id)
         elif mode == "manual":
