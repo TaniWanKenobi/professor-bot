@@ -25,6 +25,7 @@ WATCHERS_FILE = "watchers.json"
 MANUAL_FILE = "manual_participants.json"
 SLICE_FILE = "slice.json"
 SLICE_REMOVED_FILE = "slice_removed.json"
+GENDER_CACHE_FILE = "gender_cache.json"
 
 USAGE = (
     "*`/professor` — mentorship group channel manager*\n\n"
@@ -238,25 +239,75 @@ def resolve_name(client, user_id: str) -> str:
 
 # ---------- gender / pronoun resolution ----------
 
-_gender_cache: dict[str, str] = {}
+_gender_cache: dict[str, str] = _load(GENDER_CACHE_FILE, {})
 
-def _genderize(first_name: str) -> str:
+def _save_gender_cache():
+    _save(GENDER_CACHE_FILE, _gender_cache)
+
+def _genderize_batch(names: list[str]) -> dict[str, str]:
+    """Call Genderize.io with up to 10 names at once. Returns {name: result}."""
+    results = {}
     try:
-        clean = re.sub(r"[^\x00-\x7F]", "", first_name).strip()
-        if not clean:
-            return "?"
-        url = f"http://api.genderize.io/?name={urllib.parse.quote(clean.lower())}"
+        query = "&".join(f"name[]={urllib.parse.quote(n.lower())}" for n in names)
+        url = f"http://api.genderize.io/?{query}"
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        gender = data.get("gender")
-        prob = int((data.get("probability") or 0) * 100)
-        if gender == "male":
-            return f"♂ {prob}%"
-        if gender == "female":
-            return f"♀ {prob}%"
+        if isinstance(data, list):
+            items = data
+        else:
+            items = [data]
+        for item in items:
+            name = item.get("name", "")
+            gender = item.get("gender")
+            prob = int((item.get("probability") or 0) * 100)
+            if gender == "male":
+                results[name.lower()] = f"♂ {prob}%"
+            elif gender == "female":
+                results[name.lower()] = f"♀ {prob}%"
+            else:
+                results[name.lower()] = "?"
     except Exception as e:
-        print(f"[genderize] error for '{first_name}': {e}")
-    return "?"
+        print(f"[genderize] batch error: {e}")
+    return results
+
+def genderize_users(client, user_ids: list[str]):
+    """Pre-fetch gender for a list of users, using cache and batched API calls."""
+    to_lookup: list[tuple[str, str]] = []  # (user_id, first_name)
+
+    for uid in user_ids:
+        if uid in _gender_cache:
+            continue
+        try:
+            resp = client.users_info(user=uid)
+            user = resp["user"]
+            if user.get("is_bot") or user.get("is_app_user"):
+                _gender_cache[uid] = "bot"
+                continue
+            profile = user["profile"]
+            pronouns = (profile.get("pronouns") or "").strip()
+            if pronouns:
+                _gender_cache[uid] = pronouns
+                continue
+            real_name = (profile.get("real_name") or "").strip()
+            display_name = (profile.get("display_name") or "").strip()
+            name = real_name or display_name
+            first = re.sub(r"[^\x00-\x7F]", "", name.split()[0] if name else "").strip()
+            if first:
+                to_lookup.append((uid, first))
+            else:
+                _gender_cache[uid] = "?"
+        except Exception:
+            _gender_cache[uid] = "?"
+
+    # Batch genderize in groups of 10
+    for i in range(0, len(to_lookup), 10):
+        batch = to_lookup[i:i+10]
+        names = [first for _, first in batch]
+        name_results = _genderize_batch(names)
+        for uid, first in batch:
+            _gender_cache[uid] = name_results.get(first.lower(), "?")
+
+    _save_gender_cache()
 
 def is_bot_user(client, user_id: str) -> bool:
     try:
@@ -264,34 +315,10 @@ def is_bot_user(client, user_id: str) -> bool:
         user = resp["user"]
         return user.get("is_bot", False) or user.get("is_app_user", False)
     except Exception:
-        return True  # if we can't fetch them, treat as bot/invalid
+        return True
 
-def get_user_gender_str(client, user_id: str) -> str:
-    if user_id in _gender_cache:
-        return _gender_cache[user_id]
-    result = "?"
-    try:
-        resp = client.users_info(user=user_id)
-        user = resp["user"]
-        if user.get("is_bot") or user.get("is_app_user"):
-            _gender_cache[user_id] = "bot"
-            return "bot"
-        profile = user["profile"]
-        pronouns = (profile.get("pronouns") or "").strip()
-        if pronouns:
-            result = pronouns
-        else:
-            # Prefer real_name for genderizing — display_name is often a handle
-            real_name = (profile.get("real_name") or "").strip()
-            display_name = (profile.get("display_name") or "").strip()
-            name_to_use = real_name or display_name
-            first = name_to_use.split()[0] if name_to_use else ""
-            if first:
-                result = _genderize(first)
-    except Exception as e:
-        print(f"[gender] error for {user_id}: {e}")
-    _gender_cache[user_id] = result
-    return result
+def get_user_gender_str(user_id: str) -> str:
+    return _gender_cache.get(user_id, "?")
 
 
 # ---------- helpers ----------
@@ -401,8 +428,10 @@ def _build_unplaced_blocks(unplaced: list[str], bot_channels: list, channel_coun
         {"type": "context", "elements": [{"type": "mrkdwn", "text": f":{emoji}: reactions on <{link}|signup message> — select a group to add each person"}]},
         {"type": "divider"},
     ]
+    if client:
+        genderize_users(client, unplaced)
     for uid in unplaced:
-        gender_str = get_user_gender_str(client, uid) if client else "?"
+        gender_str = get_user_gender_str(uid)
         options = [
             {
                 "text": {"type": "plain_text", "text": f"Group {c['group_id']} — {channel_counts.get(c['group_id'], '?')} mentees"},
