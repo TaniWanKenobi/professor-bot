@@ -260,13 +260,25 @@ def _genderize(first_name: str) -> str:
         print(f"[genderize] error for '{first_name}': {e}")
     return "?"
 
+def is_bot_user(client, user_id: str) -> bool:
+    try:
+        resp = client.users_info(user=user_id)
+        user = resp["user"]
+        return user.get("is_bot", False) or user.get("is_app_user", False)
+    except Exception:
+        return True  # if we can't fetch them, treat as bot/invalid
+
 def get_user_gender_str(client, user_id: str) -> str:
     if user_id in _gender_cache:
         return _gender_cache[user_id]
     result = "?"
     try:
         resp = client.users_info(user=user_id)
-        profile = resp["user"]["profile"]
+        user = resp["user"]
+        if user.get("is_bot") or user.get("is_app_user"):
+            _gender_cache[user_id] = "bot"
+            return "bot"
+        profile = user["profile"]
         pronouns = (profile.get("pronouns") or "").strip()
         if pronouns:
             result = pronouns
@@ -431,10 +443,22 @@ def _do_watcher_flush():
             # Merge manual participants (website signups) with Slack reactors
             all_participants = list(dict.fromkeys(all_reactors + load_manual_participants()))
             slice_removed_ids = {r["user_id"] for r in load_slice_removed()}
-            unplaced = [u for u in all_participants if u not in excluded and u not in slice_removed_ids and not get_user_group(u)]
+            unplaced = [
+                u for u in all_participants
+                if u not in excluded
+                and u not in slice_removed_ids
+                and not get_user_group(u)
+                and not is_bot_user(app.client, u)
+            ]
             if unplaced:
-                blocks = _build_unplaced_blocks(unplaced, bot_channels, channel_counts, w["link"], w["emoji"], client=app.client)
-                app.client.chat_postMessage(channel=admin, text=f"Unplaced reactors ({len(unplaced)})", blocks=blocks)
+                all_blocks = _build_unplaced_blocks(unplaced, bot_channels, channel_counts, w["link"], w["emoji"], client=app.client)
+                # Chunk into messages of max 47 blocks to stay under Slack's 50-block limit
+                header = all_blocks[:3]
+                person_blocks = all_blocks[3:]
+                chunks = [person_blocks[i:i+44] for i in range(0, len(person_blocks), 44)]
+                for i, chunk in enumerate(chunks):
+                    send_blocks = (header if i == 0 else []) + chunk
+                    app.client.chat_postMessage(channel=admin, text=f"Unplaced reactors ({len(unplaced)})", blocks=send_blocks)
             else:
                 summary = "\n".join(
                     f"• <#{c['channel_id']}> Group {c['group_id']}: {channel_counts.get(c['group_id'], '?')} mentees"
@@ -483,25 +507,30 @@ def handle_add_to_group(ack, action, client, body):
                     break
             save_plan(plan)
 
-        # Recalculate counts from updated channels.json
-        mentors_set = set(load_mentors()) | ({load_admin()} if load_admin() else set())
-        bot_channels = load_channels()
-        channel_counts = {
-            c["group_id"]: len([p for p in c.get("participants", []) if p not in mentors_set])
-            for c in bot_channels
-        }
-        sorted_channels = sorted(bot_channels, key=lambda c: channel_counts.get(c["group_id"], 999))
-
         msg_ts = body["message"]["ts"]
         old_blocks = body["message"].get("blocks", [])
-        new_blocks = []
 
+        # Parse current counts from existing options, then increment the target group
+        current_counts: dict[int, int] = {}
+        for b in old_blocks:
+            if b.get("type") == "section" and b.get("accessory", {}).get("action_id") == "add_to_group":
+                for opt in b.get("accessory", {}).get("options", []):
+                    m = re.match(r"Group (\d+) — (\d+) mentees", opt.get("text", {}).get("text", ""))
+                    if m:
+                        current_counts[int(m.group(1))] = int(m.group(2))
+                break
+        current_counts[gid] = current_counts.get(gid, 0) + 1
+        sorted_gids = sorted(current_counts.keys(), key=lambda g: current_counts[g])
+
+        bot_channels = load_channels()
+        gid_to_channel = {c["group_id"]: c["channel_id"] for c in bot_channels}
+
+        new_blocks = []
         for b in old_blocks:
             if b.get("type") == "section" and b.get("accessory", {}).get("action_id") == "add_to_group":
                 block_text = b.get("text", {}).get("text", "")
                 if uid in block_text:
                     continue  # remove the just-added person
-                # Extract user ID from backticks: "<@UID> `UID` • gender"
                 try:
                     block_uid = block_text.split("`")[1]
                 except IndexError:
@@ -509,10 +538,11 @@ def handle_add_to_group(ack, action, client, body):
                 if block_uid:
                     b["accessory"]["options"] = [
                         {
-                            "text": {"type": "plain_text", "text": f"Group {c['group_id']} — {channel_counts.get(c['group_id'], '?')} mentees"},
-                            "value": f"{block_uid}:{c['group_id']}",
+                            "text": {"type": "plain_text", "text": f"Group {g} — {current_counts[g]} mentees"},
+                            "value": f"{block_uid}:{g}",
                         }
-                        for c in sorted_channels
+                        for g in sorted_gids
+                        if g in gid_to_channel
                     ]
             new_blocks.append(b)
 
