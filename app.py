@@ -242,13 +242,11 @@ _gender_cache: dict[str, str] = {}
 
 def _genderize(first_name: str) -> str:
     try:
-        # Strip non-ASCII characters (emoji, CJK etc. won't genderize)
         clean = re.sub(r"[^\x00-\x7F]", "", first_name).strip()
         if not clean:
             return "?"
-        url = f"https://api.genderize.io/?name={urllib.parse.quote(clean.lower())}"
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
+        url = f"http://api.genderize.io/?name={urllib.parse.quote(clean.lower())}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         gender = data.get("gender")
         prob = int((data.get("probability") or 0) * 100)
