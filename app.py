@@ -434,10 +434,54 @@ def handle_add_to_group(ack, action, client, body):
                     break
             save_plan(plan)
 
-        client.chat_postMessage(
-            channel=dm_channel,
-            text=f"✓ Added <@{uid}> to <#{ch['channel_id']}> (Group {gid}) and updated the plan.",
+        # Update the original watcher message in place:
+        # 1. Remove this user's section block
+        # 2. Update mentee counts and header
+        msg_ts = body["message"]["ts"]
+        old_blocks = body["message"].get("blocks", [])
+
+        # Filter out the block containing this user's mention
+        new_blocks = [b for b in old_blocks if not (
+            b.get("type") == "section"
+            and uid in b.get("text", {}).get("text", "")
+            and b.get("accessory", {}).get("action_id") == "add_to_group"
+        )]
+
+        # Update header count
+        remaining = sum(
+            1 for b in new_blocks
+            if b.get("type") == "section"
+            and b.get("accessory", {}).get("action_id") == "add_to_group"
         )
+
+        # Rebuild channel summary with updated counts
+        mentors_set = set(load_mentors()) | ({load_admin()} if load_admin() else set())
+        bot_channels = load_channels()
+        summary_lines = []
+        for c in sorted(bot_channels, key=lambda x: x["group_id"]):
+            count = len([p for p in c.get("participants", []) if p not in mentors_set])
+            summary_lines.append(f"  • <#{c['channel_id']}> Group {c['group_id']}: {count} mentees")
+
+        # Replace old summary block if present
+        new_blocks = [b for b in new_blocks if not (
+            b.get("type") == "section"
+            and "mentees" in b.get("text", {}).get("text", "")
+            and b.get("accessory") is None
+        )]
+        if summary_lines:
+            new_blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Current mentee counts:*\n" + "\n".join(summary_lines)}
+            })
+
+        # Update header
+        for b in new_blocks:
+            if b.get("type") == "header":
+                b["text"]["text"] = f"Unplaced reactors ({remaining})"
+                break
+
+        client.chat_update(channel=dm_channel, ts=msg_ts, blocks=new_blocks, text=f"Unplaced reactors ({remaining})")
+
     except Exception as e:
         client.chat_postMessage(channel=dm_channel, text=f"Error: {e}")
 
