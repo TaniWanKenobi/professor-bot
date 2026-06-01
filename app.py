@@ -381,7 +381,8 @@ def _do_watcher_flush():
                     break
             # Merge manual participants (website signups) with Slack reactors
             all_participants = list(dict.fromkeys(all_reactors + load_manual_participants()))
-            unplaced = [u for u in all_participants if u not in excluded and not get_user_group(u)]
+            slice_removed_ids = {r["user_id"] for r in load_slice_removed()}
+            unplaced = [u for u in all_participants if u not in excluded and u not in slice_removed_ids and not get_user_group(u)]
             if unplaced:
                 blocks = _build_unplaced_blocks(unplaced, bot_channels, channel_counts, w["link"], w["emoji"])
                 app.client.chat_postMessage(channel=admin, text=f"Unplaced reactors ({len(unplaced)})", blocks=blocks)
@@ -1592,7 +1593,8 @@ def handle_audit_cmd(parts: list[str], client, respond):
     excluded = load_exclude_list()
     slack_reactors = get_reactors(client, channel, timestamp, emoji)
     all_participants = list(dict.fromkeys(slack_reactors + load_manual_participants()))
-    reactors = [u for u in all_participants if u not in excluded]
+    slice_removed_ids = {r["user_id"] for r in load_slice_removed()}
+    reactors = [u for u in all_participants if u not in excluded and u not in slice_removed_ids]
 
     if not reactors:
         respond(text=f"No :{emoji}: reactors found (or all are excluded).", response_type="ephemeral")
