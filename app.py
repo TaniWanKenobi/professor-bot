@@ -3,6 +3,8 @@ import re
 import json
 import random
 import threading
+import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from slack_bolt import App
@@ -233,6 +235,46 @@ def resolve_name(client, user_id: str) -> str:
     return _name_cache[user_id]
 
 
+# ---------- gender / pronoun resolution ----------
+
+_gender_cache: dict[str, str] = {}
+
+def _genderize(first_name: str) -> str:
+    try:
+        url = f"https://api.genderize.io/?name={urllib.parse.quote(first_name)}"
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            data = json.loads(resp.read())
+            gender = data.get("gender")
+            prob = int((data.get("probability") or 0) * 100)
+            if gender == "male":
+                return f"♂ {prob}%"
+            if gender == "female":
+                return f"♀ {prob}%"
+    except Exception:
+        pass
+    return "?"
+
+def get_user_gender_str(client, user_id: str) -> str:
+    if user_id in _gender_cache:
+        return _gender_cache[user_id]
+    result = "?"
+    try:
+        resp = client.users_info(user=user_id)
+        profile = resp["user"]["profile"]
+        pronouns = profile.get("pronouns", "").strip()
+        if pronouns:
+            result = pronouns
+        else:
+            display = profile.get("display_name", "") or profile.get("real_name", "")
+            first = display.split()[0] if display else ""
+            if first:
+                result = _genderize(first)
+    except Exception:
+        pass
+    _gender_cache[user_id] = result
+    return result
+
+
 # ---------- helpers ----------
 
 def parse_mentions(tokens: list[str]) -> list[str]:
@@ -333,7 +375,7 @@ def _get_channel_counts(bot_channels, mentors_set, admin) -> dict[int, int]:
             counts[c["group_id"]] = -1
     return counts
 
-def _build_unplaced_blocks(unplaced: list[str], bot_channels: list, channel_counts: dict, link: str, emoji: str) -> list:
+def _build_unplaced_blocks(unplaced: list[str], bot_channels: list, channel_counts: dict, link: str, emoji: str, client=None) -> list:
     sorted_channels = sorted(bot_channels, key=lambda c: channel_counts.get(c["group_id"], 999))
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": f"Unplaced reactors ({len(unplaced)})", "emoji": True}},
@@ -341,6 +383,7 @@ def _build_unplaced_blocks(unplaced: list[str], bot_channels: list, channel_coun
         {"type": "divider"},
     ]
     for uid in unplaced:
+        gender_str = get_user_gender_str(client, uid) if client else "?"
         options = [
             {
                 "text": {"type": "plain_text", "text": f"Group {c['group_id']} — {channel_counts.get(c['group_id'], '?')} mentees"},
@@ -350,7 +393,7 @@ def _build_unplaced_blocks(unplaced: list[str], bot_channels: list, channel_coun
         ]
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"<@{uid}> `{uid}`"},
+            "text": {"type": "mrkdwn", "text": f"<@{uid}> `{uid}` • {gender_str}"},
             "accessory": {
                 "type": "static_select",
                 "placeholder": {"type": "plain_text", "text": "Add to group →"},
@@ -384,7 +427,7 @@ def _do_watcher_flush():
             slice_removed_ids = {r["user_id"] for r in load_slice_removed()}
             unplaced = [u for u in all_participants if u not in excluded and u not in slice_removed_ids and not get_user_group(u)]
             if unplaced:
-                blocks = _build_unplaced_blocks(unplaced, bot_channels, channel_counts, w["link"], w["emoji"])
+                blocks = _build_unplaced_blocks(unplaced, bot_channels, channel_counts, w["link"], w["emoji"], client=app.client)
                 app.client.chat_postMessage(channel=admin, text=f"Unplaced reactors ({len(unplaced)})", blocks=blocks)
             else:
                 summary = "\n".join(
@@ -452,7 +495,7 @@ def handle_add_to_group(ack, action, client, body):
                 block_text = b.get("text", {}).get("text", "")
                 if uid in block_text:
                     continue  # remove the just-added person
-                # Extract user ID from backticks: "<@UID> `UID`"
+                # Extract user ID from backticks: "<@UID> `UID` • gender"
                 try:
                     block_uid = block_text.split("`")[1]
                 except IndexError:
