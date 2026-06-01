@@ -21,6 +21,7 @@ ADMIN_FILE = "admin.json"
 WATCHERS_FILE = "watchers.json"
 MANUAL_FILE = "manual_participants.json"
 SLICE_FILE = "slice.json"
+SLICE_REMOVED_FILE = "slice_removed.json"
 
 USAGE = (
     "*`/professor` — mentorship group channel manager*\n\n"
@@ -151,6 +152,9 @@ def save_manual_participants(u): _save(MANUAL_FILE, list(dict.fromkeys(u)))
 
 def load_slice(): return _load(SLICE_FILE, [])
 def save_slice(s): _save(SLICE_FILE, s)
+
+def load_slice_removed(): return _load(SLICE_REMOVED_FILE, [])
+def save_slice_removed(s): _save(SLICE_REMOVED_FILE, s)
 
 
 
@@ -1305,6 +1309,49 @@ def handle_mentor_finish(client, respond):
     respond(text=f"DM sent — {total} non-reactor(s) to review.", response_type="ephemeral")
 
 
+@app.action("slice_readd")
+def handle_slice_readd(ack, action, client, body):
+    ack()
+    uid = body["user"]["id"]
+    channel_id, gid_str = action["value"].split(":")
+    gid = int(gid_str)
+
+    try:
+        client.conversations_invite(channel=channel_id, users=uid)
+
+        channels = load_channels()
+        for c in channels:
+            if c["channel_id"] == channel_id:
+                if uid not in c.get("participants", []) and uid not in c.get("mentors", []):
+                    c["participants"].append(uid)
+                break
+        save_channels(channels)
+
+        plan = load_plan()
+        if plan:
+            for g in plan["groups"]:
+                if g["id"] == gid:
+                    if uid not in g["participants"] and uid not in g["mentors"]:
+                        g["participants"].append(uid)
+                    break
+            save_plan(plan)
+
+        admin = load_admin()
+        admin_name, admin_avatar = _get_user_identity(client, admin) if admin else ("Professor", None)
+        dm_kwargs = {
+            "channel": uid,
+            "text": "You've been re-added!",
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"You've been re-added to <#{channel_id}>! Welcome back :)"}}],
+            "username": admin_name,
+        }
+        if admin_avatar:
+            dm_kwargs["icon_url"] = admin_avatar
+        client.chat_postMessage(**dm_kwargs)
+
+    except Exception as e:
+        client.chat_postMessage(channel=uid, text=f"Sorry, there was an error re-adding you: {e}. Please DM the organizer.")
+
+
 @app.action("slice_remove")
 def handle_slice_remove(ack, action, client, body):
     ack()
@@ -1316,11 +1363,10 @@ def handle_slice_remove(ack, action, client, body):
         client.conversations_kick(channel=channel_id, user=uid)
 
         channels = load_channels()
-        for c in channels:
-            if c["channel_id"] == channel_id:
-                if uid in c.get("participants", []):
-                    c["participants"].remove(uid)
-                break
+        ch = next((c for c in channels if c["channel_id"] == channel_id), None)
+        ch_name = ch["channel_name"] if ch else channel_id
+        if ch and uid in ch.get("participants", []):
+            ch["participants"].remove(uid)
         save_channels(channels)
 
         plan = load_plan()
@@ -1332,7 +1378,51 @@ def handle_slice_remove(ack, action, client, body):
                     break
             save_plan(plan)
 
-        client.chat_postMessage(channel=dm_channel, text=f"✓ Removed <@{uid}> from <#{channel_id}>.")
+        # Store removal record
+        removed = load_slice_removed()
+        removed.append({
+            "user_id": uid,
+            "group_id": gid,
+            "channel_id": channel_id,
+            "channel_name": ch_name,
+            "removed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        save_slice_removed(removed)
+
+        # DM the removed user, appearing as the admin
+        admin = load_admin()
+        admin_name, admin_avatar = _get_user_identity(client, admin) if admin else ("Professor", None)
+        dm_kwargs = {
+            "channel": uid,
+            "text": "You've been removed from your mentor group.",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "Hey! I recently sent a message in your mentor group asking everyone to react if they're working on a Fallout project or planning to come to Fallout — since you didn't react, I went ahead and removed you from the group.\n\nIf this was a mistake and you do plan to work on a Fallout project or come to Fallout, press the button below to be re-added!",
+                    },
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Re-add me to my group!"},
+                            "style": "primary",
+                            "value": f"{channel_id}:{gid}",
+                            "action_id": "slice_readd",
+                        }
+                    ],
+                },
+            ],
+            "username": admin_name,
+        }
+        if admin_avatar:
+            dm_kwargs["icon_url"] = admin_avatar
+        client.chat_postMessage(**dm_kwargs)
+
+        client.chat_postMessage(channel=dm_channel, text=f"✓ Removed <@{uid}> from <#{channel_id}> (Group {gid}) and sent them a DM.")
     except Exception as e:
         client.chat_postMessage(channel=dm_channel, text=f"Error removing <@{uid}>: {e}")
 
