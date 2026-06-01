@@ -3,6 +3,7 @@ import re
 import json
 import random
 import threading
+import ssl
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
@@ -241,17 +242,22 @@ _gender_cache: dict[str, str] = {}
 
 def _genderize(first_name: str) -> str:
     try:
-        url = f"https://api.genderize.io/?name={urllib.parse.quote(first_name)}"
-        with urllib.request.urlopen(url, timeout=3) as resp:
-            data = json.loads(resp.read())
-            gender = data.get("gender")
-            prob = int((data.get("probability") or 0) * 100)
-            if gender == "male":
-                return f"♂ {prob}%"
-            if gender == "female":
-                return f"♀ {prob}%"
-    except Exception:
-        pass
+        # Strip non-ASCII characters (emoji, CJK etc. won't genderize)
+        clean = re.sub(r"[^\x00-\x7F]", "", first_name).strip()
+        if not clean:
+            return "?"
+        url = f"https://api.genderize.io/?name={urllib.parse.quote(clean.lower())}"
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        gender = data.get("gender")
+        prob = int((data.get("probability") or 0) * 100)
+        if gender == "male":
+            return f"♂ {prob}%"
+        if gender == "female":
+            return f"♀ {prob}%"
+    except Exception as e:
+        print(f"[genderize] error for '{first_name}': {e}")
     return "?"
 
 def get_user_gender_str(client, user_id: str) -> str:
@@ -261,16 +267,16 @@ def get_user_gender_str(client, user_id: str) -> str:
     try:
         resp = client.users_info(user=user_id)
         profile = resp["user"]["profile"]
-        pronouns = profile.get("pronouns", "").strip()
+        pronouns = (profile.get("pronouns") or "").strip()
         if pronouns:
             result = pronouns
         else:
-            display = profile.get("display_name", "") or profile.get("real_name", "")
+            display = (profile.get("display_name") or profile.get("real_name") or "").strip()
             first = display.split()[0] if display else ""
             if first:
                 result = _genderize(first)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[gender] error for {user_id}: {e}")
     _gender_cache[user_id] = result
     return result
 
