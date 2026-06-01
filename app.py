@@ -286,10 +286,8 @@ def get_user_gender_str(client, user_id: str) -> str:
             display_name = (profile.get("display_name") or "").strip()
             name_to_use = real_name or display_name
             first = name_to_use.split()[0] if name_to_use else ""
-            print(f"[gender] {user_id}: real_name={real_name!r} display={display_name!r} → genderizing '{first}'")
             if first:
                 result = _genderize(first)
-                print(f"[gender] {user_id}: result={result!r}")
     except Exception as e:
         print(f"[gender] error for {user_id}: {e}")
     _gender_cache[user_id] = result
