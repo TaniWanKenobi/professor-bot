@@ -1226,8 +1226,14 @@ def handle_mentor_finish(client, respond):
         respond(text="No active slice. Run `/professor mentor slice <message>` first.", response_type="ephemeral")
         return
 
-    mentors_set = set(load_mentors())
     channels = load_channels()
+    # Build a complete set of everyone who should never be kicked:
+    # mentors.json + every mentor assigned to any channel + admin
+    mentors_set = set(load_mentors())
+    for c in channels:
+        mentors_set.update(c.get("mentors", []))
+    if admin:
+        mentors_set.add(admin)
     total = 0
     all_blocks = []
 
@@ -1260,7 +1266,7 @@ def handle_mentor_finish(client, respond):
             members = []
 
         # Never include mentors or admin — use global reactor set
-        non_reactors = [u for u in members if u not in global_reactors and u not in mentors_set and u != admin]
+        non_reactors = [u for u in members if u not in global_reactors and u not in mentors_set]
         if not non_reactors:
             continue
 
