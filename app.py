@@ -434,47 +434,43 @@ def handle_add_to_group(ack, action, client, body):
                     break
             save_plan(plan)
 
-        # Update the original watcher message in place:
-        # 1. Remove this user's section block
-        # 2. Update mentee counts and header
-        msg_ts = body["message"]["ts"]
-        old_blocks = body["message"].get("blocks", [])
-
-        # Filter out the block containing this user's mention
-        new_blocks = [b for b in old_blocks if not (
-            b.get("type") == "section"
-            and uid in b.get("text", {}).get("text", "")
-            and b.get("accessory", {}).get("action_id") == "add_to_group"
-        )]
-
-        # Update header count
-        remaining = sum(
-            1 for b in new_blocks
-            if b.get("type") == "section"
-            and b.get("accessory", {}).get("action_id") == "add_to_group"
-        )
-
-        # Rebuild channel summary with updated counts
+        # Recalculate counts from updated channels.json
         mentors_set = set(load_mentors()) | ({load_admin()} if load_admin() else set())
         bot_channels = load_channels()
-        summary_lines = []
-        for c in sorted(bot_channels, key=lambda x: x["group_id"]):
-            count = len([p for p in c.get("participants", []) if p not in mentors_set])
-            summary_lines.append(f"  • <#{c['channel_id']}> Group {c['group_id']}: {count} mentees")
+        channel_counts = {
+            c["group_id"]: len([p for p in c.get("participants", []) if p not in mentors_set])
+            for c in bot_channels
+        }
+        sorted_channels = sorted(bot_channels, key=lambda c: channel_counts.get(c["group_id"], 999))
 
-        # Replace old summary block if present
-        new_blocks = [b for b in new_blocks if not (
-            b.get("type") == "section"
-            and "mentees" in b.get("text", {}).get("text", "")
-            and b.get("accessory") is None
-        )]
-        if summary_lines:
-            new_blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*Current mentee counts:*\n" + "\n".join(summary_lines)}
-            })
+        msg_ts = body["message"]["ts"]
+        old_blocks = body["message"].get("blocks", [])
+        new_blocks = []
 
-        # Update header
+        for b in old_blocks:
+            if b.get("type") == "section" and b.get("accessory", {}).get("action_id") == "add_to_group":
+                block_text = b.get("text", {}).get("text", "")
+                if uid in block_text:
+                    continue  # remove the just-added person
+                # Extract user ID from backticks: "<@UID> `UID`"
+                try:
+                    block_uid = block_text.split("`")[1]
+                except IndexError:
+                    block_uid = None
+                if block_uid:
+                    b["accessory"]["options"] = [
+                        {
+                            "text": {"type": "plain_text", "text": f"Group {c['group_id']} — {channel_counts.get(c['group_id'], '?')} mentees"},
+                            "value": f"{block_uid}:{c['group_id']}",
+                        }
+                        for c in sorted_channels
+                    ]
+            new_blocks.append(b)
+
+        remaining = sum(
+            1 for b in new_blocks
+            if b.get("type") == "section" and b.get("accessory", {}).get("action_id") == "add_to_group"
+        )
         for b in new_blocks:
             if b.get("type") == "header":
                 b["text"]["text"] = f"Unplaced reactors ({remaining})"
