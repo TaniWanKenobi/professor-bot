@@ -1231,21 +1231,19 @@ def handle_mentor_finish(client, respond):
     total = 0
     all_blocks = []
 
+    # Collect ALL reactors across ALL slice messages — reacting in any group counts globally
+    global_reactors: set[str] = set()
+    for record in slice_records:
+        try:
+            resp = client.reactions_get(channel=record["channel_id"], timestamp=record["message_ts"], full=True)
+            for r in resp["message"].get("reactions", []):
+                global_reactors.update(r["users"])
+        except Exception:
+            pass
+
     for record in slice_records:
         cid = record["channel_id"]
         gid = record["group_id"]
-        emoji = record["emoji"]
-        ts = record["message_ts"]
-
-        try:
-            resp = client.reactions_get(channel=cid, timestamp=ts, full=True)
-            reactors = set()
-            for r in resp["message"].get("reactions", []):
-                if r["name"] == emoji:
-                    reactors = set(r["users"])
-                    break
-        except Exception:
-            reactors = set()
 
         try:
             cursor, members = None, []
@@ -1261,7 +1259,8 @@ def handle_mentor_finish(client, respond):
         except Exception:
             members = []
 
-        non_reactors = [u for u in members if u not in reactors and u not in mentors_set and u != admin]
+        # Never include mentors or admin — use global reactor set
+        non_reactors = [u for u in members if u not in global_reactors and u not in mentors_set and u != admin]
         if not non_reactors:
             continue
 
@@ -1359,6 +1358,11 @@ def handle_slice_remove(ack, action, client, body):
     gid = int(gid_str)
     dm_channel = body["channel"]["id"]
 
+    # Safety: never kick mentors or admin
+    if uid in set(load_mentors()) or uid == load_admin():
+        client.chat_postMessage(channel=dm_channel, text=f"⚠️ Blocked: <@{uid}> is a mentor or admin and cannot be removed.")
+        return
+
     try:
         client.conversations_kick(channel=channel_id, user=uid)
 
@@ -1400,7 +1404,7 @@ def handle_slice_remove(ack, action, client, body):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "Hey! I recently sent a message in your mentor group asking everyone to react if they're working on a Fallout project or planning to come to Fallout — since you didn't react, I went ahead and removed you from the group.\n\nIf this was a mistake and you do plan to work on a Fallout project or come to Fallout, press the button below to be re-added!",
+                        "text": "Hey! I recently sent a message in your mentor group asking everyone to react if they're working on a Fallout project or planning to come to Fallout. It looks like you didn't respond, so I went ahead and removed you from the group.\n\nIf this was a mistake and you do plan to work on a Fallout project or come to Fallout, press the button below to be re-added!",
                     },
                 },
                 {
